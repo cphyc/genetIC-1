@@ -819,6 +819,25 @@ public:
     logging::entry() << "... success!" << endl;
   }
 
+  //! \brief Imports whitenoise field data for a given level from a supplied file.
+  /*!
+  * \param level - level on which to import the data
+  * \param filename - string giving the path to the file to be imported.
+  */
+  virtual void importWhitenoiseLevel(size_t level, std::string filename) {
+
+    initialiseRandomComponentIfUninitialised();
+    logging::entry() << "Importing whitenoise random field on level " << level << " from " << filename << endl;
+    checkLevelExists(level, 0);
+    assert(outputFields[0]->getTransferType() == particle::species::whitenoise);
+
+    auto &levelField = outputFields[0]->getFieldForLevel(level);
+    levelField.loadGridData(filename);
+    levelField.setFourier(false);
+    levelField.toFourier();
+    logging::entry() << "... success!" << endl;
+  }
+
 
   //! Applies appropriate power spectrum to all fields.
   virtual void applyPowerSpec() {
@@ -1635,16 +1654,9 @@ public:
   }
 
   //! Splicing: fixes the flagged region, while reinitialising the exterior from a new random field
-  virtual void splice(size_t newSeed) {
+  virtual void spliceRandomSeedHelper(size_t newSeed, bool usePotential) {
     initialiseRandomComponentIfUninitialised();
-    if(outputFields.size()>1)
-      throw std::runtime_error("Splicing is not yet implemented for the case of multiple transfer functions");
-
-    // This operation only makes sense while we are still working with the white noise
-    if(outputFields[0]->getTransferType() != particle::species::whitenoise) {
-      throw std::runtime_error("It is too late in the IC generation process to perform splicing; try moving the splice command earlier");
-    }
-
+    
     fields::OutputField<GridDataType> newField = fields::OutputField<GridDataType>(multiLevelContext, particle::species::whitenoise);
     auto newGenerator = fields::RandomFieldGenerator<GridDataType>(newField);
 
@@ -1656,14 +1668,64 @@ public:
     newGenerator.draw();
     logging::entry() << "Finished constructing new random field. Beginning splice operation." << endl;
 
+    spliceHelper(newField, usePotential);
+  }
+
+  virtual void splice(size_t newSeed) {
+    spliceRandomSeedHelper(newSeed, false);
+  }
+
+  virtual void splicePotential(size_t newSeed) {
+    spliceRandomSeedHelper(newSeed, true);
+  }
+  
+  virtual void spliceWhiteNoiseHelper(std::string filename, bool usePotential) {
+    // TODO: support multiple levels
+    const int level = 0;
+    assert (outputFields.size() == 1);
+
+    fields::OutputField<GridDataType> newField = fields::OutputField<GridDataType>(multiLevelContext, particle::species::whitenoise);
+    logging::entry() << "Importing whitenoise random field on level " << level << " from " << filename << endl;
+    checkLevelExists(level, 0);
+    assert(outputFields[0]->getTransferType() == particle::species::whitenoise);
+
+    auto &levelField = newField.getFieldForLevel(level);
+    levelField.loadGridData(filename);
+    levelField.setFourier(false);
+    levelField.toFourier();
+    logging::entry() << "... success!" << endl;
+    
+    spliceHelper(newField, usePotential);
+  }
+
+  virtual void spliceWhiteNoise(std::string filename) {
+    spliceWhiteNoiseHelper(filename, false);
+  }
+
+  virtual void spliceWhiteNoisePotential(std::string filename) {
+    spliceWhiteNoiseHelper(filename, true);
+  }
+
+  void spliceHelper(fields::OutputField<GridDataType> &newField, bool usePotential) {
+
+    if(outputFields.size()>1)
+      throw std::runtime_error("Splicing is not yet implemented for the case of multiple transfer functions");
+
+    // This operation only makes sense while we are still working with the white noise
+    if(outputFields[0]->getTransferType() != particle::species::whitenoise) {
+      throw std::runtime_error("It is too late in the IC generation process to perform splicing; try moving the splice command earlier");
+    }
+
     for(size_t level=0; level<multiLevelContext.getNumLevels(); ++level) {
       auto &originalFieldThisLevel = outputFields[0]->getFieldForLevel(level);
       auto &newFieldThisLevel = newField.getFieldForLevel(level);
       auto splicedFieldThisLevel = modifications::spliceOneLevel(newFieldThisLevel, originalFieldThisLevel,
-                                                             *multiLevelContext.getCovariance(level, particle::species::all));
+                                                                *multiLevelContext.getCovariance(level, particle::species::all),
+                                                                usePotential);
       splicedFieldThisLevel.toFourier();
       originalFieldThisLevel = std::move(splicedFieldThisLevel);
     }
+
   }
 
   //! Reverses the sign of the low-k modes.

@@ -136,6 +136,9 @@ void setup_parser(tools::ClassDispatch<ICType, void> &dispatch) {
   dispatch.add_class_route("reverse", static_cast<void (ICType::*)()>(&ICType::reverse));
   dispatch.add_class_route("reverse_small_k", static_cast<void (ICType::*)(FloatType)>(&ICType::reverseSmallK));
   dispatch.add_class_route("splice", &ICType::splice);
+  dispatch.add_class_route("splice_potential", &ICType::splicePotential);
+  dispatch.add_class_route("splice_whitenoise", &ICType::spliceWhiteNoise);
+  dispatch.add_class_route("splice_whitenoise_potential", &ICType::spliceWhiteNoisePotential);
 
   // Write objects to files
   // dispatch.add_class_route("dump_grid", &ICType::dumpGrid);
@@ -153,6 +156,7 @@ void setup_parser(tools::ClassDispatch<ICType, void> &dispatch) {
 
   // Load existing random field instead of generating
   dispatch.add_class_route("import_level", static_cast<void (ICType::*)(size_t, std::string)>(&ICType::importLevel));
+  dispatch.add_class_route("import_whitenoise_level", static_cast<void (ICType::*)(size_t, std::string)>(&ICType::importWhitenoiseLevel));
 
   // Extra commands related to the transfer functions:
   dispatch.add_class_route("baryon_tf_on", &ICType::setUsingBaryons);

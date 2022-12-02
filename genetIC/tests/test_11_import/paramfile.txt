@@ -17,7 +17,7 @@ outformat 5
 basegrid 50.0 16
 
 
-import_level 0 reference_grid/grid-0.npy
+import_whitenoise_level 0 reference_grid/grid-0.npy
 
 done
 

@@ -37,7 +37,8 @@ namespace modifications {
   template<typename DataType, typename T=tools::datatypes::strip_complex<DataType>>
   fields::Field<DataType,T> spliceOneLevel(fields::Field<DataType,T> & a,
                                            fields::Field<DataType,T> & b,
-                                           const fields::Field<DataType,T> & cov) {
+                                           const fields::Field<DataType,T> & cov,
+                                           bool usePotential = false) {
 
       // To understand the implementation below, first read Appendix A of Cadiou et al (2021),
       // and/or look at the 1D toy implementation (in tools/toy_implementation/gene_splicing.ipynb) which
@@ -56,6 +57,15 @@ namespace modifications {
       // otherwise, the mean value in the spliced region is unconstrained.
       fields::Field<DataType,T> preconditioner(cov);
       preconditioner.setFourierCoefficient(0, 0, 0, 1);
+      if (usePotential) {
+        preconditioner.forEachFourierCell([](std::complex<T> val, T kx, T ky, T kz) {
+          T k2 = kx * kx + ky * ky + kz * kz;
+          if (k2 != 0) {
+            val /= k2;
+          }
+          return val;
+        });
+      }
 
       fields::Field<DataType,T> delta_diff = b-a;
       delta_diff.applyTransferFunction(preconditioner, 0.5);
