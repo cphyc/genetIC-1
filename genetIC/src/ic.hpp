@@ -210,7 +210,7 @@ public:
     outputFolder = "./";
 
     // only an approximate value is needed to initialise a gas temperature
-    
+
     haveInitialisedRandomComponent = false;
 
     // Default computational options:
@@ -1514,7 +1514,7 @@ public:
       return r2_i < 1.;
     });
 
-  } 
+  }
 
   //! Flag all cells contained in the cube centered at the coordinates currently pointed at
   /*!
@@ -1713,6 +1713,58 @@ public:
     }
   }
 
+
+  //! Reverses the sign of the low-k modes.
+  virtual void MIP(T kcut, int newSeed) {
+    initialiseRandomComponentIfUninitialised();
+    if(outputFields.size()>1)
+      throw std::runtime_error("Splicing is not yet implemented for the case of multiple transfer functions");
+
+    // This operation only makes sense while we are still working with the white noise
+    if(outputFields[0]->getTransferType() != particle::species::whitenoise) {
+      throw std::runtime_error("It is too late in the IC generation process to perform MIP operation; try moving the MIP command earlier");
+    }
+
+    fields::OutputField<GridDataType> newField = fields::OutputField<GridDataType>(multiLevelContext, particle::species::whitenoise);
+    auto newGenerator = fields::RandomFieldGenerator<GridDataType>(newField);
+
+    logging::entry() << "Constructing new random field for exterior of MIP operation" << endl;
+    newGenerator.seed(newSeed);
+    newGenerator.draw();
+    logging::entry() << "Finished constructing new random field. Beginning MIP operation." << endl;
+
+    for (size_t level = 0; level < multiLevelContext.getNumLevels(); ++level) {
+      auto &originalFieldThisLevel = outputFields[0]->getFieldForLevel(level);
+      auto &newFieldThisLevel = newField.getFieldForLevel(level);
+
+      originalFieldThisLevel.toFourier();
+      newFieldThisLevel.toFourier();
+
+      T kMin = originalFieldThisLevel.getGrid().getFourierKmin();
+      T kMax = originalFieldThisLevel.getGrid().getFourierKmax();
+
+      printf("kcut for MIP operation is out of range for level=%d, kmin=%e, kcut=%e kmax=%e, level=%d\n", level, kMin, kcut, kMax, level);
+      if (!((kcut >= kMin) && (kcut <= kMax))) {
+        return;  // Nothing to do
+      }
+
+      originalFieldThisLevel.forEachFourierCellInt([&originalFieldThisLevel, &newFieldThisLevel, kcut, kMin](std::complex<T> val_old, int ikx, int iky, int ikz) {
+        std::complex<T> val_new = newFieldThisLevel.getFourierCoefficient(ikx, iky, ikz);
+
+        T k = std::sqrt(
+          std::pow(ikx * kMin, 2) +
+          std::pow(iky * kMin, 2) +
+          std::pow(ikz * kMin, 2)
+        );
+
+        if (k > kcut) {
+          return val_old;
+        } else {
+          return val_new;
+        }
+    });
+    }
+  }
 };
 
 #endif

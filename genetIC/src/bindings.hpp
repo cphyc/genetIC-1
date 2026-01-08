@@ -123,6 +123,7 @@ void setup_parser(tools::ClassDispatch<ICType, void> &dispatch) {
     dispatch.add_class_route("reverse", static_cast<void (ICType::*)()>(&ICType::reverse));
     dispatch.add_class_route("reverse_small_k", static_cast<void (ICType::*)(FloatType)>(&ICType::reverseSmallK));
     dispatch.add_class_route("splice", &ICType::splice);
+    dispatch.add_class_route("mip", static_cast<void (ICType::*)(FloatType, int)>(&ICType::MIP));
 
     // Write objects to files
     // dispatch.add_class_route("dump_grid", &ICType::dumpGrid);
