@@ -6,6 +6,7 @@
 #include <vector>
 #include <algorithm>
 #include <string>
+#include <fstream>
 #include "src/simulation/particles/species.hpp"
 
 namespace io {
@@ -141,12 +142,12 @@ namespace io {
                                              sizeof(float) * targetGrid.size2,
                                              sizeof(size_t) * targetGrid.size2};
 
-        std::vector<tools::MemMapFileWriter> files;
+        std::vector<std::ofstream> files;
 
 
         for (size_t i = 0; i < filenames.size(); ++i) {
           auto filename_i = filenames[i];
-          files.emplace_back(thisGridFilename + "/" + filename_i);
+          files.emplace_back(thisGridFilename + "/" + filename_i, std::ios::binary | std::ios::out);
           writeHeaderForGrid(files.back(), targetGrid);
         }
 
@@ -159,15 +160,17 @@ namespace io {
           baryonFieldOnLevelPtr = outputFields[1]->getFieldForLevel(level).shared_from_this();
         }
 
+        // Single allocation for all data: 9 float arrays + 1 size_t array
+        std::array<std::vector<float>, 9> floatData;
+        for (int m = 0; m < 9; ++m) {
+          floatData[m].resize(targetGrid.size2);
+        }
+        std::vector<size_t> idData(targetGrid.size2);
+
         for (size_t i_z = 0; i_z < targetGrid.size; ++i_z) {
           pb.tick();
 
-          std::vector<tools::MemMapRegion<float>> varMaps;
-          for (int m = 0; m < 9; ++m)
-            varMaps.push_back(files[m].getMemMapFortran<float>(targetGrid.size2));
-
-          tools::MemMapRegion<size_t> idMap = files[9].getMemMapFortran<size_t>(targetGrid.size2);
-
+          // Compute data for this z-slab
 #pragma omp parallel for
           for (size_t i_y = 0; i_y < targetGrid.size; ++i_y) {
             for (size_t i_x = 0; i_x < targetGrid.size; ++i_x) {
@@ -178,7 +181,6 @@ namespace io {
               Coordinate<float> velScaled(particle.vel * velFactor);
               Coordinate<float> posScaled(particle.pos * lengthFactorDisplacements);
 
-
               float deltab = (*overdensityFieldEvaluator)[i];
 
               // Detect whether we are using baryons:
@@ -186,18 +188,30 @@ namespace io {
               float pvar = pvarValue * mask;
               size_t file_index = i_y * targetGrid.size + i_x;
 
+              // Store in array of vectors
+              floatData[0][file_index] = velScaled.x;
+              floatData[1][file_index] = velScaled.y;
+              floatData[2][file_index] = velScaled.z;
+              floatData[3][file_index] = posScaled.x;
+              floatData[4][file_index] = posScaled.y;
+              floatData[5][file_index] = posScaled.z;
+              floatData[6][file_index] = deltab;
+              floatData[7][file_index] = mask;
+              floatData[8][file_index] = pvar;
+              idData[file_index] = global_index;
+            }
+          }
 
-              varMaps[0][file_index] = velScaled.x;
-              varMaps[1][file_index] = velScaled.y;
-              varMaps[2][file_index] = velScaled.z;
-              varMaps[3][file_index] = posScaled.x;
-              varMaps[4][file_index] = posScaled.y;
-              varMaps[5][file_index] = posScaled.z;
-              varMaps[6][file_index] = deltab;
-              varMaps[7][file_index] = mask;
-              varMaps[8][file_index] = pvar;
-              idMap[file_index] = global_index;
-
+#pragma omp parallel for
+          for (int m = 0; m < 10; ++m) {
+            if (m < 9) {
+              files[m].write(reinterpret_cast<const char*>(&block_lengths[m]), sizeof(int));
+              files[m].write(reinterpret_cast<const char*>(floatData[m].data()), targetGrid.size2 * sizeof(float));
+              files[m].write(reinterpret_cast<const char*>(&block_lengths[m]), sizeof(int));
+            } else {
+              files[9].write(reinterpret_cast<const char*>(&block_lengths[9]), sizeof(int));
+              files[9].write(reinterpret_cast<const char*>(idData.data()), targetGrid.size2 * sizeof(size_t));
+              files[9].write(reinterpret_cast<const char*>(&block_lengths[9]), sizeof(int));
             }
           }
         }
@@ -208,16 +222,16 @@ namespace io {
       //! \brief Output the header for a given level of the simulation.
       /*!
       Every file gets the same header.
-      
+
       \param file - file to output the header to
       \param targetGrid - grid to output header for
       */
-      void writeHeaderForGrid(tools::MemMapFileWriter &file, const grids::Grid<T> &targetGrid) {
+      void writeHeaderForGrid(std::ofstream &file, const grids::Grid<T> &targetGrid) {
         io_header_grafic header = getHeaderForGrid(targetGrid);
         int header_length = static_cast<int>(sizeof(io_header_grafic));
-        file.write<int>(header_length);
-        file.write<io_header_grafic>(header);
-        file.write<int>(header_length);
+        file.write(reinterpret_cast<const char*>(&header_length), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&header), sizeof(io_header_grafic));
+        file.write(reinterpret_cast<const char*>(&header_length), sizeof(int));
       }
 
       //! \brief Returns a grafic header appropriate for the specified grid
