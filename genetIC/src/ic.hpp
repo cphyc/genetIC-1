@@ -1792,7 +1792,8 @@ public:
     newGenerator.draw();
     logging::entry() << "Finished constructing new random field. Beginning disturb operation." << endl;
 
-
+    T alpha2 = alpha*alpha;
+    T malpha2 = 1 - alpha2;
 
     for (size_t level = 0; level < multiLevelContext.getNumLevels(); ++level) {
       auto &originalFieldThisLevel = outputFields[0]->getFieldForLevel(level);
@@ -1802,11 +1803,11 @@ public:
       newFieldThisLevel.toFourier();
 
 
-      originalFieldThisLevel.forEachFourierCellInt([&originalFieldThisLevel, &newFieldThisLevel, alpha](std::complex<T> val_old, int ikx, int iky, int ikz) {
+      originalFieldThisLevel.forEachFourierCellInt([&originalFieldThisLevel, &newFieldThisLevel, alpha2, malpha2](std::complex<T> val_old, int ikx, int iky, int ikz) {
         std::complex<T> val_new = newFieldThisLevel.getFourierCoefficient(ikx, iky, ikz);
 
-
-        return alpha*alpha*val_new + (1-alpha)*val_old
+        return alpha2*val_new + malpha2*val_old;
+        // return alpha*alpha*val_new + (1-alpha)*val_old;
         
     });
     }
