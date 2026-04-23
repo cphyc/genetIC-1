@@ -1730,6 +1730,9 @@ public:
 
     logging::entry() << "Constructing new random field for exterior of MIP operation" << endl;
     newGenerator.seed(newSeed);
+    newGenerator.setDrawInFourierSpace(true);
+    newGenerator.setParallel(true);
+    newGenerator.setReverseRandomDrawOrder(false);
     newGenerator.draw();
     logging::entry() << "Finished constructing new random field. Beginning MIP operation." << endl;
 
@@ -1743,9 +1746,9 @@ public:
       T kMin = originalFieldThisLevel.getGrid().getFourierKmin();
       T kMax = originalFieldThisLevel.getGrid().getFourierKmax();
 
-      printf("kcut for MIP operation is out of range for level=%d, kmin=%e, kcut=%e kmax=%e, level=%d\n", level, kMin, kcut, kMax, level);
+      
       if (!((kcut >= kMin) && (kcut <= kMax))) {
-        return;  // Nothing to do
+        printf("kcut for MIP operation is out of range for level=%d, kmin=%e, kcut=%e kmax=%e, level=%d\n", level, kMin, kcut, kMax, level);
       }
 
       originalFieldThisLevel.forEachFourierCellInt([&originalFieldThisLevel, &newFieldThisLevel, kcut, kMin](std::complex<T> val_old, int ikx, int iky, int ikz) {
@@ -1762,6 +1765,51 @@ public:
         } else {
           return val_new;
         }
+    });
+    }
+  }
+
+
+
+  virtual void disturb(T alpha, int newSeed) {
+    initialiseRandomComponentIfUninitialised();
+    if(outputFields.size()>1)
+      throw std::runtime_error("disturb is not yet implemented for the case of multiple transfer functions");
+
+    // This operation only makes sense while we are still working with the white noise
+    if(outputFields[0]->getTransferType() != particle::species::whitenoise) {
+      throw std::runtime_error("It is too late in the IC generation process to perform disturb operation; try moving the disturb command earlier");
+    }
+
+    fields::OutputField<GridDataType> newField = fields::OutputField<GridDataType>(multiLevelContext, particle::species::whitenoise);
+    auto newGenerator = fields::RandomFieldGenerator<GridDataType>(newField);
+
+    logging::entry() << "Constructing new random field for disturb operation" << endl;
+    newGenerator.seed(newSeed);
+    newGenerator.setDrawInFourierSpace(true);
+    newGenerator.setParallel(true);
+    newGenerator.setReverseRandomDrawOrder(false);
+    newGenerator.draw();
+    logging::entry() << "Finished constructing new random field. Beginning disturb operation." << endl;
+
+
+    T alpha2 = alpha*alpha
+    T malpha2 = 1 - alpha2
+
+    for (size_t level = 0; level < multiLevelContext.getNumLevels(); ++level) {
+      auto &originalFieldThisLevel = outputFields[0]->getFieldForLevel(level);
+      auto &newFieldThisLevel = newField.getFieldForLevel(level);
+
+      originalFieldThisLevel.toFourier();
+      newFieldThisLevel.toFourier();
+
+
+      originalFieldThisLevel.forEachFourierCellInt([&originalFieldThisLevel, &newFieldThisLevel, alpha2, malpha2](std::complex<T> val_old, int ikx, int iky, int ikz) {
+        std::complex<T> val_new = newFieldThisLevel.getFourierCoefficient(ikx, iky, ikz);
+
+
+        return alpha2*val_new + malpha2*val_old
+        
     });
     }
   }
