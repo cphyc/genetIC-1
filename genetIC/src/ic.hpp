@@ -1806,7 +1806,7 @@ public:
       originalFieldThisLevel.forEachFourierCellInt([&originalFieldThisLevel, &newFieldThisLevel, alpha2, malpha2](std::complex<T> val_old, int ikx, int iky, int ikz) {
         std::complex<T> val_new = newFieldThisLevel.getFourierCoefficient(ikx, iky, ikz);
 
-        return alpha2*val_new + malpha2*val_old;
+        return alpha2*val_old + malpha2*val_new;
         // return alpha*alpha*val_new + (1-alpha)*val_old;
         
     });
