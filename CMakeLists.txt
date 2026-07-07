@@ -67,18 +67,18 @@ set(FRACTIONAL_FILTER_TEMPERATURE "0.1" CACHE STRING
 # Git version info (for embedding in binaries, not a user-facing option)
 # ---------------------------------------------------------------------------
 
-exec_program(
-        "git"
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ARGS "rev-parse --short HEAD"
+execute_process(
+        COMMAND git rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         OUTPUT_VARIABLE GIT_VERSION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
-exec_program(
-        "bash"
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ARGS "-c 'git ls-files -m | tr \"\\n\" \" \"'"
+execute_process(
+        COMMAND bash -c "git ls-files -m | tr \"\\n\" \" \""
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         OUTPUT_VARIABLE GIT_MODIFIED
+        OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
 # ---------------------------------------------------------------------------
