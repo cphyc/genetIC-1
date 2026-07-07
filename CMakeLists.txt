@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.2)
+cmake_minimum_required(VERSION 3.17)
 
 project(IC)
 
@@ -46,7 +46,7 @@ option(USE_COMPLEX_FFT
   "Use complex-valued FFTs throughout (ICGenerator<complex<float>>/<complex<double>>) instead of the default real-valued FFTs." OFF)
 
 option(USE_CUFFT
-  "Use NVIDIA cuFFT (via its FFTW-compatible cufftw wrapper) instead of CPU FFTW. Requires a CUDA toolkit on the build machine and CMake >= 3.17." OFF)
+  "Use NVIDIA cuFFT (via its FFTW-compatible cufftw wrapper) instead of CPU FFTW. Requires a CUDA toolkit on the build machine." OFF)
 
 option(DEBUG_INFO
   "Output extra debug/performance information. Automatically enabled for Debug builds regardless of this setting; set this ON to force it on for Release/RelWithDebInfo builds too." OFF)
