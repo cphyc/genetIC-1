@@ -45,6 +45,9 @@ option(SAFER_SLOWER
 option(USE_COMPLEX_FFT
   "Use complex-valued FFTs throughout (ICGenerator<complex<float>>/<complex<double>>) instead of the default real-valued FFTs." OFF)
 
+option(USE_CUFFT
+  "Use NVIDIA cuFFT (via its FFTW-compatible cufftw wrapper) instead of CPU FFTW. Requires a CUDA toolkit on the build machine and CMake >= 3.17." OFF)
+
 option(DEBUG_INFO
   "Output extra debug/performance information. Automatically enabled for Debug builds regardless of this setting; set this ON to force it on for Release/RelWithDebInfo builds too." OFF)
 
@@ -55,11 +58,6 @@ set(FRACTIONAL_FILTER_TEMPERATURE "0.1" CACHE STRING
   "Characteristic temperature of the Fermi filter used to split information between levels, as k0 * FRACTIONAL_FILTER_TEMPERATURE. Smaller values give sharper transitions, better accuracy in Fourier space but worse in real space. The default is an empirically-determined trade-off that works well.")
 
 # --- Options present in the source but NOT exposed as clean toggles here ---
-#
-# USE_CUFFT (fourier.hpp): switches from FFTW to cuFFT headers/calls. Not wired
-# up as an option() because nothing in this file finds or links a cuFFT
-# library yet -- enabling it via a bare `-DUSE_CUFFT` will fail to link. Add
-# find_package(CUDAToolkit) and link against CUDA::cufft first if you need this.
 #
 # IGNORE_APPLE_FFTW_THREAD_LIMIT (fourier.hpp): lifts an 8-thread FFTW cap on
 # macOS. Niche/platform-specific enough that it's left as a manual
@@ -97,7 +95,7 @@ set(GENETIC_DEFINITIONS
 
 foreach(opt CUBIC_INTERPOLATION VELOCITY_MODIFICATION_GRADIENT_FOURIER_SPACE
             ZELDOVICH_GRADIENT_FOURIER_SPACE FILTER_ON_COARSE_GRID
-            SAFER_SLOWER USE_COMPLEX_FFT)
+            SAFER_SLOWER USE_COMPLEX_FFT USE_CUFFT)
   if(${opt})
     list(APPEND GENETIC_DEFINITIONS ${opt})
   endif()
@@ -181,19 +179,79 @@ set(SOURCE_FILES
         genetIC/src/bindings.hpp
 )
 
+
 include_directories( genetIC/  )
 include_directories( genetIC/HighFive/include )
 
-link_libraries(fftw3 m fftw3f fftw3_threads gsl gslcblas HDF5::HDF5 OpenMP::OpenMP_CXX)
+# ---------------------------------------------------------------------------
+# FFT backend: CPU FFTW (default) or NVIDIA cuFFT (if USE_CUFFT=ON)
+# ---------------------------------------------------------------------------
+if(USE_CUFFT)
+  if(CMAKE_VERSION VERSION_LESS 3.17)
+    message(FATAL_ERROR "USE_CUFFT requires CMake >= 3.17 (for the CUDAToolkit module). Found ${CMAKE_VERSION}. Either upgrade CMake or set USE_CUFFT=OFF.")
+  endif()
+
+  find_package(CUDAToolkit REQUIRED)
+
+  set(CUFFT_LIBRARY_DIR "" CACHE PATH
+    "Manual override: directory containing libcufft/libcufftw, for installations (e.g. NVIDIA HPC SDK / nvhpc) where these aren't in CUDAToolkit_LIBRARY_DIR.")
+  set(CUFFT_INCLUDE_DIR "" CACHE PATH
+    "Manual override: directory containing cufftw.h, for installations (e.g. NVIDIA HPC SDK / nvhpc) where it isn't in CUDAToolkit_INCLUDE_DIRS.")
+
+  set(_cufft_search_paths ${CUFFT_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_DIR})
+  set(_cufft_include_search_paths ${CUFFT_INCLUDE_DIR} ${CUDAToolkit_INCLUDE_DIRS})
+
+  # NVIDIA HPC SDK (nvhpc) installations split the math libraries
+  # (cufft, cublas, cusparse, ...) -- headers included -- into a separate
+  # math_libs/<version>/{include,lib64} tree, sibling to cuda/<version>/.
+  # CUDAToolkit_LIBRARY_DIR/CUDAToolkit_INCLUDE_DIRS alone therefore won't
+  # find cufft/cufftw on nvhpc-based clusters (e.g. Irene).
+  string(REPLACE "/cuda/" "/math_libs/" _cufft_nvhpc_guess "${CUDAToolkit_LIBRARY_DIR}")
+  if(NOT _cufft_nvhpc_guess STREQUAL CUDAToolkit_LIBRARY_DIR)
+    list(APPEND _cufft_search_paths ${_cufft_nvhpc_guess})
+    string(REPLACE "/lib64" "/include" _cufft_nvhpc_include_guess "${_cufft_nvhpc_guess}")
+    list(APPEND _cufft_include_search_paths ${_cufft_nvhpc_include_guess})
+  endif()
+
+  find_path(CUFFT_HEADER_DIR NAMES cufftw.h HINTS ${_cufft_include_search_paths})
+  if(NOT CUFFT_HEADER_DIR)
+    message(FATAL_ERROR "USE_CUFFT is ON but cufftw.h could not be found. Searched: ${_cufft_include_search_paths}. Locate it with e.g.:\n  find $(dirname $(dirname ${CUDAToolkit_LIBRARY_DIR}))/.. -name 'cufftw.h' 2>/dev/null\nthen pass it explicitly: -DCUFFT_INCLUDE_DIR=/path/to/math_libs/<version>/include")
+  endif()
+  set(FFT_INCLUDE_DIRS ${CUFFT_HEADER_DIR})
+
+  if(TARGET CUDA::cufftw)
+    # CUDA::cufftw imported target only exists from CMake 3.23 onward
+    set(FFT_LIBRARIES CUDA::cufftw CUDA::cufft)
+  else()
+    find_library(CUFFTW_LIBRARY NAMES cufftw HINTS ${_cufft_search_paths})
+    find_library(CUFFT_LIBRARY NAMES cufft HINTS ${_cufft_search_paths})
+    if(NOT CUFFTW_LIBRARY OR NOT CUFFT_LIBRARY)
+      message(FATAL_ERROR "USE_CUFFT is ON but the cufftw/cufft libraries could not be found. Searched: ${_cufft_search_paths}. If you're on the NVIDIA HPC SDK (nvhpc), locate the real path with e.g.:\n  find $(dirname $(dirname ${CUDAToolkit_LIBRARY_DIR}))/.. -name 'libcufft.so*' 2>/dev/null\nthen pass it explicitly: -DCUFFT_LIBRARY_DIR=/path/to/math_libs/<version>/lib64")
+    endif()
+    set(FFT_LIBRARIES ${CUFFTW_LIBRARY} ${CUFFT_LIBRARY})
+  endif()
+
+  message(STATUS "genetIC: using cuFFT (via cufftw) as the FFT backend")
+  message(STATUS "genetIC: cufftw header dir = ${CUFFT_HEADER_DIR}")
+  message(STATUS "genetIC: cufftw = ${CUFFTW_LIBRARY}")
+  message(STATUS "genetIC: cufft  = ${CUFFT_LIBRARY}")
+else()
+  set(FFT_INCLUDE_DIRS "")
+  # cufftw re-exports the same symbol names as real FFTW3, so these must
+  # never be linked at the same time as the cuFFT libraries above.
+  set(FFT_LIBRARIES fftw3 fftw3f fftw3_threads)
+endif()
+
+link_libraries(${FFT_LIBRARIES} m gsl gslcblas HDF5::HDF5 OpenMP::OpenMP_CXX)
 
 add_compile_options(-Wextra)
 
 add_executable(genetIC ${SOURCE_FILES} genetIC/src/main.cpp)
 add_executable(genetIC_mapper ${SOURCE_FILES} genetIC/src/main_mapper.cpp)
 
-# Add directories containing HDF5 headers
-target_include_directories(genetIC PRIVATE ${HDF5_INCLUDE_DIRS})
-target_include_directories(genetIC_mapper PRIVATE ${HDF5_INCLUDE_DIRS})
+# Add directories containing HDF5 and (if enabled) cuFFT headers
+target_include_directories(genetIC PRIVATE ${HDF5_INCLUDE_DIRS} ${FFT_INCLUDE_DIRS})
+target_include_directories(genetIC_mapper PRIVATE ${HDF5_INCLUDE_DIRS} ${FFT_INCLUDE_DIRS})
 
 # Apply the code options to both targets
 target_compile_definitions(genetIC PRIVATE ${GENETIC_DEFINITIONS})
