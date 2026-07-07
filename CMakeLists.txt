@@ -171,10 +171,10 @@ set(SOURCE_FILES
         genetIC/src/simulation/multilevelgrid/mask.hpp
         genetIC/src/tools/memmap.hpp
         genetIC/src/tools/numerics/tricubic.hpp
-	genetIC/src/tools/logging.hpp
-	genetIC/src/tools/logging.cpp
-	genetIC/src/simulation/modifications/splice.hpp
-	genetIC/src/tools/lru_cache.hpp
+        genetIC/src/tools/logging.hpp
+        genetIC/src/tools/logging.cpp
+        genetIC/src/simulation/modifications/splice.hpp
+        genetIC/src/tools/lru_cache.hpp
         genetIC/src/io/swift.hpp
         genetIC/src/bindings.hpp
 )
