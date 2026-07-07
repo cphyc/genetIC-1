@@ -114,6 +114,14 @@ if(OpenMP_CXX_FOUND)
   list(APPEND GENETIC_DEFINITIONS OPENMP)
 endif()
 
+# Special case on macos
+if(APPLE)
+  include_directories(/opt/homebrew/include)
+  link_directories(/opt/homebrew/lib)
+  include_directories( /opt/local/include )
+  link_directories(/opt/local/lib )
+endif()
+
 # ---------------------------------------------------------------------------
 # Sources and targets
 # ---------------------------------------------------------------------------
