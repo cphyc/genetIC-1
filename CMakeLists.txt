@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(IC)
+project(IC LANGUAGES CXX)
 
 if(POLICY CMP0074)
   cmake_policy(SET CMP0074 NEW)
@@ -11,15 +11,26 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/genetIC)
 
+# Default to a Release build if the user didn't specify one. Left unset, CMake
+# applies neither optimization flags nor -DNDEBUG, which is rarely what you want.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "RelWithDebInfo" "MinSizeRel")
+  message(STATUS "CMAKE_BUILD_TYPE not specified, defaulting to Release")
+endif()
+
+# Homebrew/MacPorts aren't on the default search path on macOS. Adding them to
+# CMAKE_PREFIX_PAT
+if(APPLE)
+  list(APPEND CMAKE_PREFIX_PATH /opt/homebrew /opt/local)
+endif()
+
 # ---------------------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------------------
 
-# OpenMP
-find_package(OpenMP COMPONENTS CXX)
-
-# HDF5
-find_package(HDF5 COMPONENTS HL CXX)
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+find_package(HDF5 REQUIRED COMPONENTS HL CXX)
 
 # ---------------------------------------------------------------------------
 # Code options. Probably don't fiddle with these unless you know what you're doing.
@@ -67,19 +78,35 @@ set(FRACTIONAL_FILTER_TEMPERATURE "0.1" CACHE STRING
 # Git version info (for embedding in binaries, not a user-facing option)
 # ---------------------------------------------------------------------------
 
-execute_process(
-        COMMAND git rev-parse --short HEAD
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE GIT_VERSION
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-)
+find_package(Git QUIET)
 
-execute_process(
-        COMMAND bash -c "git ls-files -m | tr \"\\n\" \" \""
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE GIT_MODIFIED
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-)
+set(GIT_VERSION "unknown")
+set(GIT_MODIFIED "")
+
+if(Git_FOUND)
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE _git_rev_parse_result
+  )
+  if(NOT _git_rev_parse_result EQUAL 0)
+    set(GIT_VERSION "unknown")
+  endif()
+
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} ls-files -m
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE _git_modified_files
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  string(REPLACE "\n" " " GIT_MODIFIED "${_git_modified_files}")
+else()
+  message(STATUS "git not found: building without embedded GIT_VERSION/GIT_MODIFIED info")
+endif()
 
 # ---------------------------------------------------------------------------
 # Assemble the definitions list
@@ -114,19 +141,208 @@ if(OpenMP_CXX_FOUND)
   list(APPEND GENETIC_DEFINITIONS OPENMP)
 endif()
 
-# Special case on macos
-if(APPLE)
-  include_directories(/opt/homebrew/include)
-  link_directories(/opt/homebrew/lib)
-  include_directories( /opt/local/include )
-  link_directories(/opt/local/lib )
+# ---------------------------------------------------------------------------
+# FFT backend: CPU FFTW (default) or NVIDIA cuFFT (if USE_CUFFT=ON)
+# ---------------------------------------------------------------------------
+if(USE_CUFFT)
+  find_package(CUDAToolkit REQUIRED)
+
+  set(CUFFT_LIBRARY_DIR "" CACHE PATH
+    "Manual override: directory containing libcufft/libcufftw, for installations (e.g. NVIDIA HPC SDK / nvhpc) where these aren't in CUDAToolkit_LIBRARY_DIR.")
+  set(CUFFT_INCLUDE_DIR "" CACHE PATH
+    "Manual override: directory containing cufftw.h, for installations (e.g. NVIDIA HPC SDK / nvhpc) where it isn't in CUDAToolkit_INCLUDE_DIRS.")
+
+  set(_cufft_search_paths ${CUFFT_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_DIR})
+  set(_cufft_include_search_paths ${CUFFT_INCLUDE_DIR} ${CUDAToolkit_INCLUDE_DIRS})
+
+  string(REPLACE "/cuda/" "/math_libs/" _cufft_nvhpc_guess "${CUDAToolkit_LIBRARY_DIR}")
+  if(NOT _cufft_nvhpc_guess STREQUAL CUDAToolkit_LIBRARY_DIR)
+    list(APPEND _cufft_search_paths ${_cufft_nvhpc_guess})
+    string(REPLACE "/lib64" "/include" _cufft_nvhpc_include_guess "${_cufft_nvhpc_guess}")
+    list(APPEND _cufft_include_search_paths ${_cufft_nvhpc_include_guess})
+  endif()
+
+  find_path(CUFFT_HEADER_DIR NAMES cufftw.h HINTS ${_cufft_include_search_paths})
+  if(NOT CUFFT_HEADER_DIR)
+    message(FATAL_ERROR "USE_CUFFT is ON but cufftw.h could not be found. Searched: ${_cufft_include_search_paths}. Locate it with e.g.:\n  find $(dirname $(dirname ${CUDAToolkit_LIBRARY_DIR}))/.. -name 'cufftw.h' 2>/dev/null\nthen pass it explicitly: -DCUFFT_INCLUDE_DIR=/path/to/math_libs/<version>/include")
+  endif()
+  set(FFT_INCLUDE_DIRS ${CUFFT_HEADER_DIR})
+
+  if(TARGET CUDA::cufftw)
+    set(FFT_LIBRARIES CUDA::cufftw CUDA::cufft)
+  else()
+    find_library(CUFFTW_LIBRARY NAMES cufftw HINTS ${_cufft_search_paths})
+    find_library(CUFFT_LIBRARY NAMES cufft HINTS ${_cufft_search_paths})
+    if(NOT CUFFTW_LIBRARY OR NOT CUFFT_LIBRARY)
+      message(FATAL_ERROR "USE_CUFFT is ON but the cufftw/cufft libraries could not be found. Searched: ${_cufft_search_paths}. If you're on the NVIDIA HPC SDK (nvhpc), locate the real path with e.g.:\n  find $(dirname $(dirname ${CUDAToolkit_LIBRARY_DIR}))/.. -name 'libcufft.so*' 2>/dev/null\nthen pass it explicitly: -DCUFFT_LIBRARY_DIR=/path/to/math_libs/<version>/lib64")
+    endif()
+    set(FFT_LIBRARIES ${CUFFTW_LIBRARY} ${CUFFT_LIBRARY})
+  endif()
+
+  message(STATUS "genetIC: using cuFFT (via cufftw) as the FFT backend")
+  message(STATUS "genetIC: cufftw header dir = ${CUFFT_HEADER_DIR}")
+  message(STATUS "genetIC: cufftw = ${CUFFTW_LIBRARY}")
+  message(STATUS "genetIC: cufft  = ${CUFFT_LIBRARY}")
+  set(FFT_TARGETS "")
+
+else()
+  # -------------------------------------------------------------------------
+  # FFTW3, hardened for HPC clusters: module systems, Homebrew/MacPorts, and
+  # plain system packages all lay FFTW3 out differently, and it essentially
+  # never ships a CMake package-config file when built via autotools (the
+  # usual route on clusters) -- so we can't just find_package(FFTW3 CONFIG)
+  # and expect it to work everywhere. Detection cascades, in order:
+  #   1. Manual override (-DFFTW3_ROOT=...), for when nothing below works.
+  #   2. find_package(FFTW3 CONFIG) -- succeeds only for FFTW3 builds that
+  #      were themselves built with CMake and installed a Config file.
+  #   3. pkg-config (fftw3.pc) -- what most autotools-built/distro FFTW3
+  #      installs actually provide for the main library.
+  #   4. Manual find_path/find_library, using common cluster module
+  #      environment variables as hints.
+  # In every case we end up with real IMPORTED targets (FFTW3::fftw3,
+  # FFTW3::fftw3f, FFTW3::fftw3_threads), so downstream code never needs to
+  # care which path succeeded, and include dirs propagate automatically via
+  # INTERFACE_INCLUDE_DIRECTORIES rather than being tracked by hand.
+  # -------------------------------------------------------------------------
+
+  set(FFTW3_ROOT "" CACHE PATH
+    "Manual override: FFTW3 installation prefix (expects lib/ and include/ subdirectories), for clusters where none of the automatic detection methods find it.")
+
+  # Cluster module systems set a variety of env var names for this; check them all.
+  set(_fftw3_env_hints
+    "$ENV{FFTW3_ROOT}" "$ENV{FFTW_ROOT}" "$ENV{FFTWDIR}" "$ENV{FFTW_DIR}" "$ENV{FFTW_HOME}"
+  )
+  list(APPEND CMAKE_PREFIX_PATH ${FFTW3_ROOT} ${_fftw3_env_hints})
+
+  set(_fftw3_found FALSE)
+
+  # --- 1. CMake config-mode (rare for cluster/autotools FFTW3 builds, but free if present) ---
+  if(NOT FFTW3_ROOT)
+    find_package(FFTW3 CONFIG QUIET)
+    if(TARGET FFTW3::fftw3)
+      set(_fftw3_found TRUE)
+      message(STATUS "genetIC: found FFTW3 via CMake config package")
+    endif()
+  endif()
+
+  # --- 2. pkg-config (the common case for autotools-built/distro FFTW3) ---
+  if(NOT _fftw3_found)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+      pkg_check_modules(PC_FFTW3 QUIET fftw3)
+      if(PC_FFTW3_FOUND)
+        find_library(FFTW3_DOUBLE_LIBRARY NAMES fftw3 HINTS ${PC_FFTW3_LIBRARY_DIRS} ${FFTW3_ROOT} PATH_SUFFIXES lib lib64)
+        find_path(FFTW3_INCLUDE_DIR NAMES fftw3.h HINTS ${PC_FFTW3_INCLUDE_DIRS} ${FFTW3_ROOT} PATH_SUFFIXES include)
+        if(FFTW3_DOUBLE_LIBRARY AND FFTW3_INCLUDE_DIR)
+          set(_fftw3_found TRUE)
+          message(STATUS "genetIC: found FFTW3 via pkg-config")
+        endif()
+      endif()
+    endif()
+  endif()
+
+  # --- 3. Manual search as a last resort ---
+  if(NOT _fftw3_found)
+    find_library(FFTW3_DOUBLE_LIBRARY NAMES fftw3 HINTS ${FFTW3_ROOT} ${_fftw3_env_hints} PATH_SUFFIXES lib lib64)
+    find_path(FFTW3_INCLUDE_DIR NAMES fftw3.h HINTS ${FFTW3_ROOT} ${_fftw3_env_hints} PATH_SUFFIXES include)
+    if(FFTW3_DOUBLE_LIBRARY AND FFTW3_INCLUDE_DIR)
+      set(_fftw3_found TRUE)
+      message(STATUS "genetIC: found FFTW3 via manual search")
+    endif()
+  endif()
+
+  if(NOT _fftw3_found)
+    message(FATAL_ERROR
+      "FFTW3 could not be found by any detection method (CMake config, pkg-config, or manual search).\n"
+      "On a cluster: check `module avail fftw` and `module load <the fftw module>`, then re-run cmake.\n"
+      "On macOS with Homebrew: `brew install fftw`.\n"
+      "Otherwise, point CMake at it explicitly: -DFFTW3_ROOT=/path/to/fftw3/prefix")
+  endif()
+
+  find_path(FFTW3_INCLUDE_DIR NAMES fftw3.h HINTS ${FFTW3_ROOT} ${_fftw3_env_hints} ${PC_FFTW3_INCLUDE_DIRS} PATH_SUFFIXES include)
+  get_filename_component(_fftw3_lib_dir "${FFTW3_DOUBLE_LIBRARY}" DIRECTORY)
+
+  find_library(FFTW3_FLOAT_LIBRARY NAMES fftw3f HINTS ${_fftw3_lib_dir} ${FFTW3_ROOT} ${_fftw3_env_hints} PATH_SUFFIXES lib lib64)
+
+  # The threaded API is provided by *either* libfftw3_threads (pthreads-based)
+  # *or* libfftw3_omp (OpenMP-based) depending on how FFTW3 was configured;
+  # they're mutually exclusive alternative implementations of the same
+  # symbols, so try the pthreads variant first and fall back to the OpenMP one.
+  find_library(FFTW3_THREADS_LIBRARY NAMES fftw3_threads HINTS ${_fftw3_lib_dir} ${FFTW3_ROOT} ${_fftw3_env_hints} PATH_SUFFIXES lib lib64)
+  if(NOT FFTW3_THREADS_LIBRARY)
+    find_library(FFTW3_THREADS_LIBRARY NAMES fftw3_omp HINTS ${_fftw3_lib_dir} ${FFTW3_ROOT} ${_fftw3_env_hints} PATH_SUFFIXES lib lib64)
+    if(FFTW3_THREADS_LIBRARY)
+      message(STATUS "genetIC: using OpenMP-threaded FFTW3 (libfftw3_omp) -- pthreads variant (libfftw3_threads) not found")
+    endif()
+  endif()
+
+  if(NOT TARGET FFTW3::fftw3)
+    add_library(FFTW3::fftw3 UNKNOWN IMPORTED)
+    set_target_properties(FFTW3::fftw3 PROPERTIES
+      IMPORTED_LOCATION "${FFTW3_DOUBLE_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${FFTW3_INCLUDE_DIR}")
+  endif()
+
+  if(FFTW3_FLOAT_LIBRARY AND NOT TARGET FFTW3::fftw3f)
+    add_library(FFTW3::fftw3f UNKNOWN IMPORTED)
+    set_target_properties(FFTW3::fftw3f PROPERTIES
+      IMPORTED_LOCATION "${FFTW3_FLOAT_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${FFTW3_INCLUDE_DIR}")
+  endif()
+
+  set(FFT_TARGETS FFTW3::fftw3)
+  if(TARGET FFTW3::fftw3f)
+    list(APPEND FFT_TARGETS FFTW3::fftw3f)
+  endif()
+
+  if(FFTW3_THREADS_LIBRARY)
+    if(NOT TARGET FFTW3::fftw3_threads)
+      add_library(FFTW3::fftw3_threads UNKNOWN IMPORTED)
+      set_target_properties(FFTW3::fftw3_threads PROPERTIES
+        IMPORTED_LOCATION "${FFTW3_THREADS_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${FFTW3_INCLUDE_DIR}")
+    endif()
+    list(APPEND FFT_TARGETS FFTW3::fftw3_threads)
+  else()
+    message(WARNING "genetIC: no threaded FFTW3 library (fftw3_threads or fftw3_omp) found. "
+                     "The build will still succeed since fftw_plan_with_nthreads() is only "
+                     "called when OpenMP is NOT available, but if OpenMP is ever disabled "
+                     "this build would fail to link.")
+  endif()
+
+  message(STATUS "genetIC: using FFTW3 as the FFT backend (include: ${FFTW3_INCLUDE_DIR})")
+
+  set(FFT_INCLUDE_DIRS "")
+  set(FFT_LIBRARIES "")
 endif()
 
 # ---------------------------------------------------------------------------
-# Sources and targets
+# Shared configuration: one INTERFACE library instead of directory-scoped
+# include_directories()/link_libraries()/add_compile_options(), so both
+# executables below pick everything up with a single target_link_libraries().
 # ---------------------------------------------------------------------------
 
-set(SOURCE_FILES
+add_library(genetIC_config INTERFACE)
+
+target_include_directories(genetIC_config INTERFACE
+  ${CMAKE_CURRENT_SOURCE_DIR}/genetIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/genetIC/HighFive/include
+  ${HDF5_INCLUDE_DIRS}
+  ${FFT_INCLUDE_DIRS}
+)
+
+target_compile_definitions(genetIC_config INTERFACE ${GENETIC_DEFINITIONS})
+target_compile_options(genetIC_config INTERFACE -Wextra)
+target_link_libraries(genetIC_config INTERFACE
+  ${FFT_LIBRARIES} ${FFT_TARGETS} m gsl gslcblas HDF5::HDF5 OpenMP::OpenMP_CXX
+)
+
+# ---------------------------------------------------------------------------
+# Shared sources (headers + the few .cpp files common to both executables),
+# compiled once via an OBJECT library rather than twice per-executable.
+# ---------------------------------------------------------------------------
+
+set(COMMON_HEADERS
         genetIC/src/tools/util_functions.hpp
         genetIC/src/cosmology/parameters.hpp
         genetIC/src/dummyic.hpp
@@ -151,13 +367,10 @@ set(SOURCE_FILES
         genetIC/src/tools/filesystem.h
         genetIC/src/simulation/filters/filter.hpp
         genetIC/src/simulation/multilevelgrid/multilevelgrid.hpp
-        genetIC/src/tools/filesystem.cpp
         genetIC/src/simulation/field/multilevelfield.hpp
         genetIC/src/simulation/particles/particle.hpp
-        genetIC/src/tools/progress/progress.cpp
         genetIC/src/simulation/field/field.hpp
         genetIC/src/tools/numerics/interpolation.hpp
-        genetIC/Makefile
         genetIC/src/simulation/particles/zeldovich.hpp
         genetIC/src/simulation/particles/generator.hpp
         genetIC/src/simulation/particles/multilevelgenerator.hpp
@@ -180,92 +393,27 @@ set(SOURCE_FILES
         genetIC/src/tools/memmap.hpp
         genetIC/src/tools/numerics/tricubic.hpp
         genetIC/src/tools/logging.hpp
-        genetIC/src/tools/logging.cpp
         genetIC/src/simulation/modifications/splice.hpp
         genetIC/src/tools/lru_cache.hpp
         genetIC/src/io/swift.hpp
         genetIC/src/bindings.hpp
 )
 
+set(COMMON_SOURCES
+        genetIC/src/tools/filesystem.cpp
+        genetIC/src/tools/progress/progress.cpp
+        genetIC/src/tools/logging.cpp
+)
 
-include_directories( genetIC/  )
-include_directories( genetIC/HighFive/include )
+add_library(genetIC_common OBJECT ${COMMON_HEADERS} ${COMMON_SOURCES})
+target_link_libraries(genetIC_common PUBLIC genetIC_config)
 
 # ---------------------------------------------------------------------------
-# FFT backend: CPU FFTW (default) or NVIDIA cuFFT (if USE_CUFFT=ON)
+# Executables
 # ---------------------------------------------------------------------------
-if(USE_CUFFT)
-  if(CMAKE_VERSION VERSION_LESS 3.17)
-    message(FATAL_ERROR "USE_CUFFT requires CMake >= 3.17 (for the CUDAToolkit module). Found ${CMAKE_VERSION}. Either upgrade CMake or set USE_CUFFT=OFF.")
-  endif()
 
-  find_package(CUDAToolkit REQUIRED)
+add_executable(genetIC genetIC/src/main.cpp)
+target_link_libraries(genetIC PRIVATE genetIC_common)
 
-  set(CUFFT_LIBRARY_DIR "" CACHE PATH
-    "Manual override: directory containing libcufft/libcufftw, for installations (e.g. NVIDIA HPC SDK / nvhpc) where these aren't in CUDAToolkit_LIBRARY_DIR.")
-  set(CUFFT_INCLUDE_DIR "" CACHE PATH
-    "Manual override: directory containing cufftw.h, for installations (e.g. NVIDIA HPC SDK / nvhpc) where it isn't in CUDAToolkit_INCLUDE_DIRS.")
-
-  set(_cufft_search_paths ${CUFFT_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_DIR})
-  set(_cufft_include_search_paths ${CUFFT_INCLUDE_DIR} ${CUDAToolkit_INCLUDE_DIRS})
-
-  # NVIDIA HPC SDK (nvhpc) installations split the math libraries
-  # (cufft, cublas, cusparse, ...) -- headers included -- into a separate
-  # math_libs/<version>/{include,lib64} tree, sibling to cuda/<version>/.
-  # CUDAToolkit_LIBRARY_DIR/CUDAToolkit_INCLUDE_DIRS alone therefore won't
-  # find cufft/cufftw on nvhpc-based clusters (e.g. Irene).
-  string(REPLACE "/cuda/" "/math_libs/" _cufft_nvhpc_guess "${CUDAToolkit_LIBRARY_DIR}")
-  if(NOT _cufft_nvhpc_guess STREQUAL CUDAToolkit_LIBRARY_DIR)
-    list(APPEND _cufft_search_paths ${_cufft_nvhpc_guess})
-    string(REPLACE "/lib64" "/include" _cufft_nvhpc_include_guess "${_cufft_nvhpc_guess}")
-    list(APPEND _cufft_include_search_paths ${_cufft_nvhpc_include_guess})
-  endif()
-
-  find_path(CUFFT_HEADER_DIR NAMES cufftw.h HINTS ${_cufft_include_search_paths})
-  if(NOT CUFFT_HEADER_DIR)
-    message(FATAL_ERROR "USE_CUFFT is ON but cufftw.h could not be found. Searched: ${_cufft_include_search_paths}. Locate it with e.g.:\n  find $(dirname $(dirname ${CUDAToolkit_LIBRARY_DIR}))/.. -name 'cufftw.h' 2>/dev/null\nthen pass it explicitly: -DCUFFT_INCLUDE_DIR=/path/to/math_libs/<version>/include")
-  endif()
-  set(FFT_INCLUDE_DIRS ${CUFFT_HEADER_DIR})
-
-  if(TARGET CUDA::cufftw)
-    # CUDA::cufftw imported target only exists from CMake 3.23 onward
-    set(FFT_LIBRARIES CUDA::cufftw CUDA::cufft)
-  else()
-    find_library(CUFFTW_LIBRARY NAMES cufftw HINTS ${_cufft_search_paths})
-    find_library(CUFFT_LIBRARY NAMES cufft HINTS ${_cufft_search_paths})
-    if(NOT CUFFTW_LIBRARY OR NOT CUFFT_LIBRARY)
-      message(FATAL_ERROR "USE_CUFFT is ON but the cufftw/cufft libraries could not be found. Searched: ${_cufft_search_paths}. If you're on the NVIDIA HPC SDK (nvhpc), locate the real path with e.g.:\n  find $(dirname $(dirname ${CUDAToolkit_LIBRARY_DIR}))/.. -name 'libcufft.so*' 2>/dev/null\nthen pass it explicitly: -DCUFFT_LIBRARY_DIR=/path/to/math_libs/<version>/lib64")
-    endif()
-    set(FFT_LIBRARIES ${CUFFTW_LIBRARY} ${CUFFT_LIBRARY})
-  endif()
-
-  message(STATUS "genetIC: using cuFFT (via cufftw) as the FFT backend")
-  message(STATUS "genetIC: cufftw header dir = ${CUFFT_HEADER_DIR}")
-  message(STATUS "genetIC: cufftw = ${CUFFTW_LIBRARY}")
-  message(STATUS "genetIC: cufft  = ${CUFFT_LIBRARY}")
-else()
-  # FFTW3
-  find_package(FFTW3 COMPONENTS Threads)
-
-  set(FFT_INCLUDE_DIRS "")
-  # cufftw re-exports the same symbol names as real FFTW3, so these must
-  # never be linked at the same time as the cuFFT libraries above.
-  set(FFT_LIBRARIES fftw3 fftw3f fftw3_threads)
-
-  message(STATUS "genetIC: using FFTW3 as the FFT backend")
-endif()
-
-link_libraries(${FFT_LIBRARIES} m gsl gslcblas HDF5::HDF5 OpenMP::OpenMP_CXX)
-
-add_compile_options(-Wextra)
-
-add_executable(genetIC ${SOURCE_FILES} genetIC/src/main.cpp)
-add_executable(genetIC_mapper ${SOURCE_FILES} genetIC/src/main_mapper.cpp)
-
-# Add directories containing HDF5 and (if enabled) cuFFT headers
-target_include_directories(genetIC PRIVATE ${HDF5_INCLUDE_DIRS} ${FFT_INCLUDE_DIRS})
-target_include_directories(genetIC_mapper PRIVATE ${HDF5_INCLUDE_DIRS} ${FFT_INCLUDE_DIRS})
-
-# Apply the code options to both targets
-target_compile_definitions(genetIC PRIVATE ${GENETIC_DEFINITIONS})
-target_compile_definitions(genetIC_mapper PRIVATE ${GENETIC_DEFINITIONS})
+add_executable(genetIC_mapper genetIC/src/main_mapper.cpp)
+target_link_libraries(genetIC_mapper PRIVATE genetIC_common)
