@@ -167,154 +167,33 @@ if(USE_CUFFT)
   if(NOT CUFFT_HEADER_DIR)
     message(FATAL_ERROR "USE_CUFFT is ON but cufftw.h could not be found. Searched: ${_cufft_include_search_paths}. Locate it with e.g.:\n  find $(dirname $(dirname ${CUDAToolkit_LIBRARY_DIR}))/.. -name 'cufftw.h' 2>/dev/null\nthen pass it explicitly: -DCUFFT_INCLUDE_DIR=/path/to/math_libs/<version>/include")
   endif()
-  set(FFT_INCLUDE_DIRS ${CUFFT_HEADER_DIR})
+  set(FFTW_INCLUDE_DIRS ${CUFFT_HEADER_DIR})
 
   if(TARGET CUDA::cufftw)
-    set(FFT_LIBRARIES CUDA::cufftw CUDA::cufft)
+    set(FFTW_LIBRARIES CUDA::cufftw CUDA::cufft)
   else()
     find_library(CUFFTW_LIBRARY NAMES cufftw HINTS ${_cufft_search_paths})
     find_library(CUFFT_LIBRARY NAMES cufft HINTS ${_cufft_search_paths})
     if(NOT CUFFTW_LIBRARY OR NOT CUFFT_LIBRARY)
       message(FATAL_ERROR "USE_CUFFT is ON but the cufftw/cufft libraries could not be found. Searched: ${_cufft_search_paths}. If you're on the NVIDIA HPC SDK (nvhpc), locate the real path with e.g.:\n  find $(dirname $(dirname ${CUDAToolkit_LIBRARY_DIR}))/.. -name 'libcufft.so*' 2>/dev/null\nthen pass it explicitly: -DCUFFT_LIBRARY_DIR=/path/to/math_libs/<version>/lib64")
     endif()
-    set(FFT_LIBRARIES ${CUFFTW_LIBRARY} ${CUFFT_LIBRARY})
+    set(FFTW_LIBRARIES ${CUFFTW_LIBRARY} ${CUFFT_LIBRARY})
   endif()
 
   message(STATUS "genetIC: using cuFFT (via cufftw) as the FFT backend")
   message(STATUS "genetIC: cufftw header dir = ${CUFFT_HEADER_DIR}")
   message(STATUS "genetIC: cufftw = ${CUFFTW_LIBRARY}")
   message(STATUS "genetIC: cufft  = ${CUFFT_LIBRARY}")
-  set(FFT_TARGETS "")
 
 else()
-  # -------------------------------------------------------------------------
-  # FFTW3, hardened for HPC clusters: module systems, Homebrew/MacPorts, and
-  # plain system packages all lay FFTW3 out differently, and it essentially
-  # never ships a CMake package-config file when built via autotools (the
-  # usual route on clusters) -- so we can't just find_package(FFTW3 CONFIG)
-  # and expect it to work everywhere. Detection cascades, in order:
-  #   1. Manual override (-DFFTW3_ROOT=...), for when nothing below works.
-  #   2. find_package(FFTW3 CONFIG) -- succeeds only for FFTW3 builds that
-  #      were themselves built with CMake and installed a Config file.
-  #   3. pkg-config (fftw3.pc) -- what most autotools-built/distro FFTW3
-  #      installs actually provide for the main library.
-  #   4. Manual find_path/find_library, using common cluster module
-  #      environment variables as hints.
-  # In every case we end up with real IMPORTED targets (FFTW3::fftw3,
-  # FFTW3::fftw3f, FFTW3::fftw3_threads), so downstream code never needs to
-  # care which path succeeded, and include dirs propagate automatically via
-  # INTERFACE_INCLUDE_DIRECTORIES rather than being tracked by hand.
-  # -------------------------------------------------------------------------
+  # Using https://github.com/egpbos/findFFTW
+  list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/findfftw)
+  message(STATUS ${CMAKE_MODULE_PATH})
 
-  set(FFTW3_ROOT "" CACHE PATH
-    "Manual override: FFTW3 installation prefix (expects lib/ and include/ subdirectories), for clusters where none of the automatic detection methods find it.")
+  find_package(FFTW REQUIRED)
 
-  # Cluster module systems set a variety of env var names for this; check them all.
-  set(_fftw3_env_hints
-    "$ENV{FFTW3_ROOT}" "$ENV{FFTW_ROOT}" "$ENV{FFTWDIR}" "$ENV{FFTW_DIR}" "$ENV{FFTW_HOME}"
-  )
-  list(APPEND CMAKE_PREFIX_PATH ${FFTW3_ROOT} ${_fftw3_env_hints})
+  message(STATUS "genetIC: using FFTW3 as the FFT backend (include: ${FFTW_INCLUDE_DIRS})")
 
-  set(_fftw3_found FALSE)
-
-  # --- 1. CMake config-mode (rare for cluster/autotools FFTW3 builds, but free if present) ---
-  if(NOT FFTW3_ROOT)
-    find_package(FFTW3 CONFIG QUIET)
-    if(TARGET FFTW3::fftw3)
-      set(_fftw3_found TRUE)
-      message(STATUS "genetIC: found FFTW3 via CMake config package")
-    endif()
-  endif()
-
-  # --- 2. pkg-config (the common case for autotools-built/distro FFTW3) ---
-  if(NOT _fftw3_found)
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-      pkg_check_modules(PC_FFTW3 QUIET fftw3)
-      if(PC_FFTW3_FOUND)
-        find_library(FFTW3_DOUBLE_LIBRARY NAMES fftw3 HINTS ${PC_FFTW3_LIBRARY_DIRS} ${FFTW3_ROOT} PATH_SUFFIXES lib lib64)
-        find_path(FFTW3_INCLUDE_DIR NAMES fftw3.h HINTS ${PC_FFTW3_INCLUDE_DIRS} ${FFTW3_ROOT} PATH_SUFFIXES include)
-        if(FFTW3_DOUBLE_LIBRARY AND FFTW3_INCLUDE_DIR)
-          set(_fftw3_found TRUE)
-          message(STATUS "genetIC: found FFTW3 via pkg-config")
-        endif()
-      endif()
-    endif()
-  endif()
-
-  # --- 3. Manual search as a last resort ---
-  if(NOT _fftw3_found)
-    find_library(FFTW3_DOUBLE_LIBRARY NAMES fftw3 HINTS ${FFTW3_ROOT} ${_fftw3_env_hints} PATH_SUFFIXES lib lib64)
-    find_path(FFTW3_INCLUDE_DIR NAMES fftw3.h HINTS ${FFTW3_ROOT} ${_fftw3_env_hints} PATH_SUFFIXES include)
-    if(FFTW3_DOUBLE_LIBRARY AND FFTW3_INCLUDE_DIR)
-      set(_fftw3_found TRUE)
-      message(STATUS "genetIC: found FFTW3 via manual search")
-    endif()
-  endif()
-
-  if(NOT _fftw3_found)
-    message(FATAL_ERROR
-      "FFTW3 could not be found by any detection method (CMake config, pkg-config, or manual search).\n"
-      "On a cluster: check `module avail fftw` and `module load <the fftw module>`, then re-run cmake.\n"
-      "On macOS with Homebrew: `brew install fftw`.\n"
-      "Otherwise, point CMake at it explicitly: -DFFTW3_ROOT=/path/to/fftw3/prefix")
-  endif()
-
-  find_path(FFTW3_INCLUDE_DIR NAMES fftw3.h HINTS ${FFTW3_ROOT} ${_fftw3_env_hints} ${PC_FFTW3_INCLUDE_DIRS} PATH_SUFFIXES include)
-  get_filename_component(_fftw3_lib_dir "${FFTW3_DOUBLE_LIBRARY}" DIRECTORY)
-
-  find_library(FFTW3_FLOAT_LIBRARY NAMES fftw3f HINTS ${_fftw3_lib_dir} ${FFTW3_ROOT} ${_fftw3_env_hints} PATH_SUFFIXES lib lib64)
-
-  # The threaded API is provided by *either* libfftw3_threads (pthreads-based)
-  # *or* libfftw3_omp (OpenMP-based) depending on how FFTW3 was configured;
-  # they're mutually exclusive alternative implementations of the same
-  # symbols, so try the pthreads variant first and fall back to the OpenMP one.
-  find_library(FFTW3_THREADS_LIBRARY NAMES fftw3_threads HINTS ${_fftw3_lib_dir} ${FFTW3_ROOT} ${_fftw3_env_hints} PATH_SUFFIXES lib lib64)
-  if(NOT FFTW3_THREADS_LIBRARY)
-    find_library(FFTW3_THREADS_LIBRARY NAMES fftw3_omp HINTS ${_fftw3_lib_dir} ${FFTW3_ROOT} ${_fftw3_env_hints} PATH_SUFFIXES lib lib64)
-    if(FFTW3_THREADS_LIBRARY)
-      message(STATUS "genetIC: using OpenMP-threaded FFTW3 (libfftw3_omp) -- pthreads variant (libfftw3_threads) not found")
-    endif()
-  endif()
-
-  if(NOT TARGET FFTW3::fftw3)
-    add_library(FFTW3::fftw3 UNKNOWN IMPORTED)
-    set_target_properties(FFTW3::fftw3 PROPERTIES
-      IMPORTED_LOCATION "${FFTW3_DOUBLE_LIBRARY}"
-      INTERFACE_INCLUDE_DIRECTORIES "${FFTW3_INCLUDE_DIR}")
-  endif()
-
-  if(FFTW3_FLOAT_LIBRARY AND NOT TARGET FFTW3::fftw3f)
-    add_library(FFTW3::fftw3f UNKNOWN IMPORTED)
-    set_target_properties(FFTW3::fftw3f PROPERTIES
-      IMPORTED_LOCATION "${FFTW3_FLOAT_LIBRARY}"
-      INTERFACE_INCLUDE_DIRECTORIES "${FFTW3_INCLUDE_DIR}")
-  endif()
-
-  set(FFT_TARGETS FFTW3::fftw3)
-  if(TARGET FFTW3::fftw3f)
-    list(APPEND FFT_TARGETS FFTW3::fftw3f)
-  endif()
-
-  if(FFTW3_THREADS_LIBRARY)
-    if(NOT TARGET FFTW3::fftw3_threads)
-      add_library(FFTW3::fftw3_threads UNKNOWN IMPORTED)
-      set_target_properties(FFTW3::fftw3_threads PROPERTIES
-        IMPORTED_LOCATION "${FFTW3_THREADS_LIBRARY}"
-        INTERFACE_INCLUDE_DIRECTORIES "${FFTW3_INCLUDE_DIR}")
-    endif()
-    list(APPEND FFT_TARGETS FFTW3::fftw3_threads)
-  else()
-    message(WARNING "genetIC: no threaded FFTW3 library (fftw3_threads or fftw3_omp) found. "
-                     "The build will still succeed since fftw_plan_with_nthreads() is only "
-                     "called when OpenMP is NOT available, but if OpenMP is ever disabled "
-                     "this build would fail to link.")
-  endif()
-
-  message(STATUS "genetIC: using FFTW3 as the FFT backend (include: ${FFTW3_INCLUDE_DIR})")
-
-  set(FFT_INCLUDE_DIRS "")
-  set(FFT_LIBRARIES "")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -336,7 +215,7 @@ target_include_directories(genetIC_config INTERFACE
 target_compile_definitions(genetIC_config INTERFACE ${GENETIC_DEFINITIONS})
 target_compile_options(genetIC_config INTERFACE -Wextra)
 target_link_libraries(genetIC_config INTERFACE
-  ${FFT_LIBRARIES} ${FFT_TARGETS} m GSL::gsl GSL::gslcblas HDF5::HDF5 OpenMP::OpenMP_CXX
+  ${FFTW_LIBRARIES} ${FFTW_TARGETS} m GSL::gsl GSL::gslcblas HDF5::HDF5 OpenMP::OpenMP_CXX
 )
 
 # ---------------------------------------------------------------------------
