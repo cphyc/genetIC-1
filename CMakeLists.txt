@@ -244,10 +244,15 @@ if(USE_CUFFT)
   message(STATUS "genetIC: cufftw = ${CUFFTW_LIBRARY}")
   message(STATUS "genetIC: cufft  = ${CUFFT_LIBRARY}")
 else()
+  # FFTW3
+  find_package(FFTW3 COMPONENTS Threads)
+
   set(FFT_INCLUDE_DIRS "")
   # cufftw re-exports the same symbol names as real FFTW3, so these must
   # never be linked at the same time as the cuFFT libraries above.
   set(FFT_LIBRARIES fftw3 fftw3f fftw3_threads)
+
+  message(STATUS "genetIC: using FFTW3 as the FFT backend")
 endif()
 
 link_libraries(${FFT_LIBRARIES} m gsl gslcblas HDF5::HDF5 OpenMP::OpenMP_CXX)
