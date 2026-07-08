@@ -31,6 +31,7 @@ endif()
 
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 find_package(HDF5 REQUIRED COMPONENTS HL CXX)
+find_package(GSL REQUIRED)
 
 # ---------------------------------------------------------------------------
 # Code options. Probably don't fiddle with these unless you know what you're doing.
@@ -329,12 +330,13 @@ target_include_directories(genetIC_config INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}/genetIC/HighFive/include
   ${HDF5_INCLUDE_DIRS}
   ${FFT_INCLUDE_DIRS}
+  ${GSL_INCLUDE_DIRS}
 )
 
 target_compile_definitions(genetIC_config INTERFACE ${GENETIC_DEFINITIONS})
 target_compile_options(genetIC_config INTERFACE -Wextra)
 target_link_libraries(genetIC_config INTERFACE
-  ${FFT_LIBRARIES} ${FFT_TARGETS} m gsl gslcblas HDF5::HDF5 OpenMP::OpenMP_CXX
+  ${FFT_LIBRARIES} ${FFT_TARGETS} m GSL::gsl GSL::gslcblas HDF5::HDF5 OpenMP::OpenMP_CXX
 )
 
 # ---------------------------------------------------------------------------
