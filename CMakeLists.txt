@@ -188,11 +188,19 @@ if(USE_CUFFT)
 else()
   # Using https://github.com/egpbos/findFFTW
   list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/findfftw)
-  message(STATUS ${CMAKE_MODULE_PATH})
 
   find_package(FFTW REQUIRED)
 
-  message(STATUS "genetIC: using FFTW3 as the FFT backend (include: ${FFTW_INCLUDE_DIRS})")
+  # Only keep non-MPI libraries
+  set(FFTW_LIBRARIES FFTW::Float FFTW::Double )
+
+  if (FFTW_DOUBLE_OPENMP_LIB_FOUND)
+    list(APPEND FFTW_LIBRARIES FFTW::DoubleOpenMP FFTW::FloatOpenMP)
+  elseif(FFTW_DOUBLE_THREADS_LIB_FOUND)
+    list(APPEND FFTW_LIBRARIES FFTW::DoubleThreads FFTW::FloatThreads)
+  endif()
+
+  message(STATUS "genetIC: using FFTW3 as the FFT backend (include: ${FFTW_INCLUDE_DIRS}, targets: ${FFTW_TARGETS}, libraries: ${FFTW_LIBRARIES})")
 
 endif()
 
@@ -215,7 +223,7 @@ target_include_directories(genetIC_config INTERFACE
 target_compile_definitions(genetIC_config INTERFACE ${GENETIC_DEFINITIONS})
 target_compile_options(genetIC_config INTERFACE -Wextra)
 target_link_libraries(genetIC_config INTERFACE
-  ${FFTW_LIBRARIES} ${FFTW_TARGETS} m GSL::gsl GSL::gslcblas HDF5::HDF5 OpenMP::OpenMP_CXX
+  ${FFTW_LIBRARIES} m GSL::gsl GSL::gslcblas HDF5::HDF5 OpenMP::OpenMP_CXX
 )
 
 # ---------------------------------------------------------------------------
