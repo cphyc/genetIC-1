@@ -6,10 +6,32 @@
 #include <limits>
 #include <src/simulation/field/multilevelfield.hpp>
 #include <src/tools/numerics/cg.hpp>
+#include <src/tools/numerics/minres.hpp>
 #include <stdexcept>
 #include <type_traits>
 
 namespace modifications {
+
+  enum class SpliceSolver { cg, minres };
+
+  // Zero-embed selected density samples, including clearing FFT workspace.
+  template<typename DataType>
+  void applySpliceMask(fields::OutputField<DataType> &state,
+                       const std::vector<std::vector<unsigned char>> &membership) {
+    if(membership.size() != state.getNumLevels())
+      throw std::runtime_error("Splice mask does not match the field hierarchy");
+    state.toReal();
+    for(size_t level=0; level<state.getNumLevels(); ++level) {
+      auto &field = state.getFieldForLevel(level);
+      auto &data = field.getDataVector();
+      const auto &keep = membership[level];
+      if(keep.size() != field.getGrid().size3)
+        throw std::runtime_error("Splice mask does not match its grid");
+#pragma omp parallel for
+      for(size_t i=0; i<data.size(); ++i)
+        if(i >= keep.size() || !keep[i]) data[i] = DataType(0);
+    }
+  }
 
   /*! Production combine and its exact transpose, following manual_splicing.ipynb
    * choices 0/1. UpSample is production cubic interpolation J; its transpose
@@ -197,9 +219,13 @@ namespace modifications {
     // ======================================================================
     // Gram applications can retain Fourier white noise, avoiding an inverse
     // transform here followed immediately by a forward FFT in combine().
-    State combineTranspose(const State &v, bool realOutput = true) const {
+    State combineTranspose(const State &v, bool realOutput = true,
+                           const std::vector<std::vector<unsigned char>> *membership = nullptr) const {
       State inputs(v);
       inputs.toReal();
+      // Preconditioned directions need not be zero outside the selection.
+      // Mask the existing input copy before scattering; no extra field copy.
+      if(membership) applySpliceMask(inputs, *membership);
       State outputs(multiLevelContext, particle::species::whitenoise);
       outputs.getFieldForLevel(0);
       for (size_t level = v.getNumLevels(); level-- > 0;) {
@@ -302,11 +328,14 @@ namespace modifications {
    * Return nf in white-noise coordinates: the particle-output pipeline performs
    * combine afterwards. Returning the notebook's combined density here would
    * apply the transfer functions twice.
+   * covariancePower selects the per-grid approximate inverse C^power used by
+   * both solvers: -1 by default, or 0 for an unpreconditioned comparison.
    */
   template <typename DataType, typename T = tools::datatypes::strip_complex<DataType>>
   fields::OutputField<DataType>
   splice(const fields::OutputField<DataType> &na, const fields::OutputField<DataType> &nb, T rtol,
-         const std::vector<std::vector<size_t>> *zoomMasks = nullptr, int borderSafety = 4) {
+         const std::vector<std::vector<size_t>> *zoomMasks = nullptr, int borderSafety = 4,
+         SpliceSolver solver = SpliceSolver::cg, T covariancePower = T(-1)) {
     using State = fields::OutputField<DataType>;
 
     // ======================================================================
@@ -314,6 +343,8 @@ namespace modifications {
     // ======================================================================
     if (!std::isfinite(rtol) || rtol <= 0 || rtol >= 1)
       throw std::runtime_error("Splice relative tolerance must be finite and between zero and one");
+    if (!std::isfinite(covariancePower))
+      throw std::runtime_error("Splice preconditioner covariance power must be finite");
     if (!na.isCompatible(nb) || na.getTransferType() != particle::species::whitenoise ||
         nb.getTransferType() != particle::species::whitenoise)
       throw std::runtime_error("Splicing requires compatible white-noise fields");
@@ -346,30 +377,52 @@ namespace modifications {
     // ======================================================================
     // 3. Define MT = M T and TdagMdag = T^dagger M^dagger
     // ======================================================================
-    auto M = [&](State &state) {
-      state.toReal();
-      for (size_t level = 0; level < state.getNumLevels(); ++level) {
-        auto &field = state.getFieldForLevel(level);
-        auto &data = field.getDataVector();
-        const auto &keep = membership[level];
-#pragma omp parallel for
-        for (size_t i = 0; i < data.size(); ++i)
-          if (i >= keep.size() || !keep[i])
-            data[i] = DataType(0);
-      }
-    };
+    auto M = [&](State &state) { applySpliceMask(state, membership); };
     auto MT = [&](const State &state) {
       auto result = synthesis.combine(state, &selected.back());
       M(result);
       return result;
     };
-    // M^dagger is implicit: v is already zero-embedded at the selected cells.
-    // CG preserves that subspace, so only T^dagger remains to be applied.
+    // Apply M^dagger explicitly: an unmasked covariance preconditioner spreads
+    // directions beyond the selection. This also keeps the cubic scatter sparse.
     auto TdagMdag = [&](const State &v, bool realOutput = true) {
-      return synthesis.combineTranspose(v, realOutput);
+      return synthesis.combineTranspose(v, realOutput, &membership);
     };
     // G, the Gram operator G = (M T) (M T)^dagger.
     auto G = [&](const State &v) { return MT(TdagMdag(v, false)); };
+
+    // The dual system is a masked covariance, so use per-grid C_level^-1
+    // as an approximate inverse. The preconditioned recurrences preserve
+    // symmetry, requiring just one covariance multiplication per step.
+    // Each level has its own spectrum and pixel-volume normalization. Keep
+    // physical zero-power modes unchanged: only the preconditioner lifts them,
+    // using the same unit DC convention as the original single-grid solver.
+    // A zero power disables preconditioning for benchmarks.
+    std::vector<std::shared_ptr<fields::Field<DataType, T>>> covariancePowers(selected.size());
+    std::function<State(const State &)> precondition;
+    if(covariancePower != 0) {
+      for(size_t level=0; level<selected.size(); ++level) {
+        if(selected[level].empty()) continue;
+        auto kernel = std::make_shared<fields::Field<DataType, T>>(
+            *multiLevelContext.getCovariance(level, particle::species::all));
+        kernel->forEachFourierCellInt([&](auto value, int, int, int) {
+          const T c = value.real();
+          return tools::datatypes::ensure_complex<DataType>(std::pow(c > 0 ? c : T(1), covariancePower), 0);
+        });
+        covariancePowers[level] = std::move(kernel);
+      }
+      precondition = [&](const State &v) {
+        State result(v);
+        for(size_t level=0; level<selected.size(); ++level)
+          if(covariancePowers[level]) {
+            auto &field = result.getFieldForLevel(level);
+            field.toFourier();
+            field.applyTransferFunction(*covariancePowers[level], 1);
+            field.toReal();
+          }
+        return result;
+      };
+    }
 
     // ======================================================================
     // 4. Solve G lam = d, then return nf = nb + TdagMdag(lam) in white-noise units
@@ -394,9 +447,10 @@ namespace modifications {
       residual -= MT(nf);
       return residual;
     };
-    // Shared CG checks this actual output-density residual before accepting.
-    tools::numerics::conjugateGradient<DataType>(G, d, rtol, atol, densityResidual,
-                                                 std::max(size_t(100), 4 * n));
+    // Both solvers check this actual output-density residual before accepting.
+    const auto solve = solver == SpliceSolver::minres ? tools::numerics::minres<DataType>
+                                                     : tools::numerics::conjugateGradient<DataType>;
+    solve(G, d, rtol, atol, densityResidual, std::max(size_t(100), 4 * n), precondition);
     nf.toFourier();
     return nf;
   }

@@ -4,6 +4,7 @@
 #include <string>
 #include <tuple>
 #include <cassert>
+#include <cctype>
 #include <functional>
 #include <algorithm>
 #include <memory>
@@ -145,6 +146,9 @@ protected:
 
   //! Zoom masks for each level.
   std::vector<std::vector<size_t>> zoomParticleArray;
+
+  //! Iterative solver used by subsequent splice commands.
+  modifications::SpliceSolver spliceSolver = modifications::SpliceSolver::cg;
 
 
   //! Coordinates of the cell of current interest
@@ -1661,6 +1665,15 @@ public:
     outputFields[0]->reverse();
   }
 
+  //! Select the iterative solver used by subsequent splice commands.
+  void setSpliceSolver(std::string solver) {
+    std::transform(solver.begin(), solver.end(), solver.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    if(solver == "cg") spliceSolver = modifications::SpliceSolver::cg;
+    else if(solver == "minres") spliceSolver = modifications::SpliceSolver::minres;
+    else throw std::runtime_error("Unknown splice solver '" + solver + "'; expected cg or minres");
+  }
+
   //! Splicing: inserts the flagged region from newSeed into the current environment
   virtual void splice(size_t newSeed, std::optional<T> requestedAccuracy = std::nullopt) {
     const T accuracy = requestedAccuracy.value_or(T(1e-6));
@@ -1681,7 +1694,8 @@ public:
     newGenerator.draw();
     logging::entry() << "Finished constructing new random field. Beginning splice operation." << endl;
 
-    auto spliced = modifications::splice(newField, *(outputFields[0]), accuracy, &zoomParticleArray);
+    auto spliced = modifications::splice(newField, *(outputFields[0]), accuracy, &zoomParticleArray,
+                                        4, spliceSolver);
     outputFields[0]->copyData(spliced);
   }
 
