@@ -3,6 +3,8 @@
 GenetIC
 =======
 
+A compact Python/JAX implementation is available in [`genetic/`](genetic/). See [Python setup, API, and compatibility tests](PYTHON.md).
+
 GenetIC is a code to generate initial conditions for cosmological simulations, especially for zoom simulations of galaxies. It provides support for 'genetic modifications' as described by e.g. [Roth et al 2015](https://arxiv.org/abs/1504.07250), [Rey & Pontzen 2018](https://arxiv.org/abs/1706.04615). It also supports 'splicing' as described by [Cadiou et al 2021](https://arxiv.org/abs/2107.03407). 
 * The main code is written in C++ and can be found (with build instructions and a test suite) in the subfolder `genetIC`. 
 * The code is also available as [docker](http://docker.io) image `apontzen/genetic` (see the user manual for further information)

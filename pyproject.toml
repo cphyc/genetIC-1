@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genetic-jax"
+version = "0.1.0"
+description = "Compact JAX implementation of genetIC cosmological initial conditions"
+requires-python = ">=3.11"
+dependencies = ["jax>=0.4.30", "numpy>=1.26", "h5py>=3.10"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pynbody>=2"]
+
+[project.scripts]
+genetic-jax = "genetic.cli:main"
+genetic-jax-mapper = "genetic.mapper:main"
+
+[tool.setuptools]
+packages = ["genetic"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

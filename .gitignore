@@ -10,3 +10,11 @@ genetIC/doxygen/
 
 cmake-build-debug/
 .idea/
+
+# Python development outputs
+__pycache__/
+.pytest_cache/
+*.egg-info/
+.venv/
+build/
+dist/
