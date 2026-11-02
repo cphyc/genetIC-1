@@ -5,7 +5,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from .core import grid_coordinates, interpolate_grid, lowpass
+from .core import float_dtype, grid_coordinates, interpolate_grid, lowpass
 
 fft = partial(jnp.fft.rfftn, norm="ortho")
 selected_cells = jax.jit(jnp.flatnonzero, static_argnames=("size",))
@@ -236,13 +236,16 @@ def solve(
     dtype=jnp.float64,
 ):
     rhs = axpy(target, current, -1)
+    physical_dtype = float_dtype()
     cast = lambda values, kind: jax.tree.map(lambda v: v.astype(kind), values)
     physical = lambda dual: axpy(
         target,
-        operator.forward(axpy(original, operator.transpose(cast(dual, jnp.float64)))),
+        operator.forward(
+            axpy(original, operator.transpose(cast(dual, physical_dtype)))
+        ),
         -1,
     )
-    if dtype == jnp.float64:
+    if dtype == physical_dtype:
         return krylov(
             operator.gram,
             rhs,
@@ -259,8 +262,10 @@ def solve(
         lambda v: v.astype(dtype) if jnp.issubdtype(v.dtype, jnp.floating) else v,
         operator,
     )
-    apply = lambda dual: cast(work.gram(cast(dual, dtype)), jnp.float64)
-    precondition = lambda dual: cast(work.precondition(cast(dual, dtype)), jnp.float64)
+    apply = lambda dual: cast(work.gram(cast(dual, dtype)), physical_dtype)
+    precondition = lambda dual: cast(
+        work.precondition(cast(dual, dtype)), physical_dtype
+    )
     residual = lambda dual: axpy(rhs, operator.gram(dual), -1)
     dual, _, iterations = krylov(
         apply,
@@ -274,7 +279,7 @@ def solve(
         check_interval=20,
     )
     error = jnp.sqrt(sum(jnp.vdot(v, v).real for v in physical(dual)))
-    return cast(dual, jnp.float64), error, iterations
+    return cast(dual, physical_dtype), error, iterations
 
 
 def axpy(a, b, scale=1):
@@ -337,7 +342,7 @@ def krylov(
             jax.debug.callback(progress, i + 1, norm(r) / initial_norm, ordered=True)
             return i + 1, x, r, p, next_rho, norm(r)
 
-        state = (jnp.int64(0), zero, b, z, dot(b, z), norm(b))
+        state = (jnp.int32(0), zero, b, z, dot(b, z), norm(b))
         state = jax.lax.while_loop(
             lambda s: (s[0] < maximum) & (s[-1] > tolerance), step, state
         )
@@ -428,7 +433,7 @@ def krylov(
 
     scalar = lambda value: jnp.asarray(value, b[0].dtype)
     state = (
-        jnp.int64(0),
+        jnp.int32(0),
         zero,
         divide(b, beta0),
         divide(z, beta0),

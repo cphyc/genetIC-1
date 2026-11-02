@@ -6,6 +6,7 @@ import shlex
 import sys
 from pathlib import Path
 
+from jax import config
 import jax.numpy as jnp
 import numpy as np
 
@@ -424,7 +425,14 @@ class Interpreter(Geometry):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paramfile")
+    parser.add_argument(
+        "--single-precision",
+        action="store_true",
+        help="use 32-bit floating-point arrays instead of 64-bit arrays",
+    )
     args = parser.parse_args()
+    if args.single_precision:
+        config.update("jax_enable_x64", False)
     try:
         Interpreter().run(args.paramfile)
     except (ValueError, OSError) as error:

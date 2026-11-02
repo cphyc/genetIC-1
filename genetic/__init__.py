@@ -1,4 +1,4 @@
-"""Cosmological initial conditions with double precision JAX arrays."""
+"""Cosmological initial conditions with configurable JAX precision."""
 
 import os
 from pathlib import Path

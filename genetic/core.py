@@ -14,6 +14,8 @@ import jax.numpy as jnp
 fft = partial(jnp.fft.fftn, norm="ortho")
 ifft = lambda x: jnp.fft.ifftn(x, norm="ortho").real
 
+float_dtype = lambda: jnp.float64 if jax.config.x64_enabled else jnp.float32
+
 
 @jax.jit
 def natural_spline(x, y):
@@ -50,10 +52,10 @@ class Cosmology:
         a = self.a if a is None else a
         # The reference intentionally uses powf for this one occurrence of a**3.
         a3 = jnp.asarray(a, jnp.float32) ** jnp.float32(3)
-        a3 = a3.astype(jnp.float64)
+        a3 = a3.astype(float_dtype())
         h2 = self.Om / a3 + (1 - self.Om - self.Ol) / a**2 + self.Ol
         m, l = self.Om / h2 / a**3, self.Ol / h2
-        return 2.5 * a * self.Om / a**3 / h2 / (m ** jnp.float32(4 / 7).astype(jnp.float64) - l + (1 + 0.5 * m) * (1 + l / 70))
+        return 2.5 * a * self.Om / a**3 / h2 / (m ** jnp.float32(4 / 7).astype(float_dtype()) - l + (1 + 0.5 * m) * (1 + l / 70))
 
     @property
     def velocity_factor(self):
@@ -166,11 +168,11 @@ class Grid:
     def select(self, center, shape, size=0):
         d = self.delta(self.points, center)
         if shape == "sphere":
-            self.flags = jnp.sum(d * d, axis=-1) < jnp.float32(size).astype(jnp.float64) ** 2
+            self.flags = jnp.sum(d * d, axis=-1) < jnp.float32(size).astype(float_dtype()) ** 2
         elif shape == "ellipse":
             self.flags = jnp.sum((d / jnp.asarray(size, dtype=jnp.float32)) ** 2, axis=-1) < 1
         elif shape == "cube":
-            self.flags = jnp.all(jnp.abs(d) < jnp.float32(size).astype(jnp.float64) / 2, axis=-1)
+            self.flags = jnp.all(jnp.abs(d) < jnp.float32(size).astype(float_dtype()) / 2, axis=-1)
         elif shape == "nearest":
             self.flags = jnp.zeros_like(self.flags).at[tuple(self.indices(center))].set(True)
         else:
@@ -392,11 +394,11 @@ class Simulation:
                 grid = self.grids[level]
                 d = grid.delta(points, self.center)
                 if shape == "sphere":
-                    selected = jnp.sum(d * d, axis=-1) < jnp.float32(size).astype(jnp.float64) ** 2
+                    selected = jnp.sum(d * d, axis=-1) < jnp.float32(size).astype(float_dtype()) ** 2
                 elif shape == "ellipse":
                     selected = jnp.sum((d / jnp.asarray(size)) ** 2, axis=-1) < 1
                 else:
-                    selected = jnp.all(jnp.abs(d) < jnp.float32(size).astype(jnp.float64) / 2, axis=-1)
+                    selected = jnp.all(jnp.abs(d) < jnp.float32(size).astype(float_dtype()) / 2, axis=-1)
                 outside = points[selected & ~grid.contains(points)]
                 self.exterior_flags[level] = jnp.floor(outside / grid.dx + 1e-8).astype(int)
 
@@ -519,7 +521,7 @@ class Simulation:
         if mode.lower() not in ("absolute", "relative"):
             raise ValueError("Modification type must be either 'relative' or 'absolute'")
         masks = [g.flags.copy() for g in self.grids]
-        target = jnp.asarray(target, jnp.float32).astype(jnp.float64)
+        target = jnp.asarray(target, jnp.float32).astype(float_dtype())
         if mode.lower() == "relative":
             target *= self.calculate(name)
         self.modifications.append((name.lower(), target, masks, self.filter_scale))
@@ -643,12 +645,12 @@ class Simulation:
         forward, transpose = operator.forward, operator.transpose
         current = forward(original)
         maximum = jnp.maximum(100, 4 * sum(jnp.sum(m) for m in masks))
-        dtype = jnp.float32 if accuracy >= 1e-5 else jnp.float64
+        dtype = jnp.float32 if not jax.config.x64_enabled or accuracy >= 1e-5 else jnp.float64
         rng = LegacyRandom(seed)
         donor = tuple(rng.field(g.n, self.seed_mode, half_spectrum=True) for g in self.grids)
         target = forward(donor)
         rhs = axpy(target, current, -1)
-        atol = 8 * jnp.finfo(jnp.float64).eps * jnp.maximum(jnp.sqrt(self.dot(target, target)), jnp.sqrt(self.dot(current, current)))
+        atol = 8 * jnp.finfo(float_dtype()).eps * jnp.maximum(jnp.sqrt(self.dot(target, target)), jnp.sqrt(self.dot(current, current)))
         dual, error, iterations = solve(operator, original, target, current, accuracy, atol, maximum, solver=solver, dtype=dtype)
         tolerance = jnp.maximum(accuracy * jnp.sqrt(self.dot(rhs, rhs)), atol)
         if not error <= tolerance:
@@ -813,8 +815,7 @@ class Simulation:
         kind = jnp.full(n, ptype)
         if self.flagged_type is not None and not gas and level == len(self.grids) - 1:
             kind = jnp.where(grid.flags[tuple(grid.indices(points).T)], self.flagged_type, kind)
-        return dict(pos=(points + offsets) % grid.box, vel=offsets * self.cosmo.velocity_factor + self.velocity_offset, mass=jnp.full(n, mass), eps=jnp.full(n, output.soft_dx * self.eps_norm), gas=jnp.full(n, gas), ptype=kind,
-                    density=self.evaluate(self.density, level, output, points, aligned=True))
+        return dict(pos=(points + offsets) % grid.box, vel=offsets * self.cosmo.velocity_factor + self.velocity_offset, mass=jnp.full(n, mass), eps=jnp.full(n, output.soft_dx * self.eps_norm), gas=jnp.full(n, gas), ptype=kind, density=self.evaluate(self.density, level, output, points, aligned=True))
 
     def particles(self, tipsy=False):
         self.combine()

@@ -13,8 +13,10 @@ genetic-jax example/paramfile.txt
 python -m pytest
 ```
 
-Simulation arrays and kernels use JAX with 64-bit arithmetic. JAX selects the available
-CPU or accelerator; install the appropriate accelerator build of JAX to use a GPU.
+Simulation arrays and kernels use 64-bit arithmetic by default. Pass
+`--single-precision` to `genetic-jax` to use 32-bit arrays, reducing memory use
+at the cost of numerical precision. JAX selects the available CPU or accelerator;
+install the appropriate accelerator build of JAX to use a GPU.
 NumPy is used at file input/output boundaries. The C++ genetIC executable is not
 needed. Python manages commands,
 static grid sizes, and input validation; numerical buffers remain on JAX devices.
