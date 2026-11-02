@@ -5,8 +5,8 @@ GenetIC
 
 A compact Python/JAX implementation is available in [`genetic/`](genetic/). See [Python setup, API, and compatibility tests](PYTHON.md).
 
-GenetIC is a code to generate initial conditions for cosmological simulations, especially for zoom simulations of galaxies. It provides support for 'genetic modifications' as described by e.g. [Roth et al 2015](https://arxiv.org/abs/1504.07250), [Rey & Pontzen 2018](https://arxiv.org/abs/1706.04615). It also supports 'splicing' as described by [Cadiou et al 2021](https://arxiv.org/abs/2107.03407). 
-* The main code is written in C++ and can be found (with build instructions and a test suite) in the subfolder `genetIC`. 
+GenetIC is a code to generate initial conditions for cosmological simulations, especially for zoom simulations of galaxies. It provides support for 'genetic modifications' as described by e.g. [Roth et al 2015](https://arxiv.org/abs/1504.07250), [Rey & Pontzen 2018](https://arxiv.org/abs/1706.04615). It also supports 'splicing' as described by [Cadiou et al 2021](https://arxiv.org/abs/2107.03407).
+* The main code is written in C++ and can be found (with build instructions and a test suite) in the subfolder `genetIC`.
 * The code is also available as [docker](http://docker.io) image `apontzen/genetic` (see the user manual for further information)
 * A **hands-on tutorial** for genetic modification can be found at https://github.com/pynbody/genetic_example
 * **User documentation** can be found in the form of a PDF manual, also at https://github.com/pynbody/genetIC/releases/latest
@@ -17,15 +17,15 @@ GenetIC is a code to generate initial conditions for cosmological simulations, e
 License and acknowledgement policy
 ----------------------------------
 
-Legally, genetIC is released under the GNU public license v3; see LICENSE.md. However, for scientific integrity, if 
+Legally, genetIC is released under the GNU public license v3; see LICENSE.md. However, for scientific integrity, if
 you use genetIC in any stage of preparing a publication, you must at a minimum cite the code release paper. Currently the citation should be along the lines of:
 
 ```
 Stopyra et al, 2020, Submitted to ApJS. http://arxiv.org/abs/2006.01841
 ```
 
-We would recommend additionally citing the specific version of the code you used, using an appropriate Zenodo 
+We would recommend additionally citing the specific version of the code you used, using an appropriate Zenodo
 DOI citation, which can be found [here](https://doi.org/10.5281/zenodo.3874396). There is a versions panel which lists DOIs for each release.
 
-If you receive assistance from any of the genetIC authors, we  also ask that you consider offering an acknowledgement 
-or, in cases where the assistance is material to the development of a project, coauthorship to those who are helping you. 
+If you receive assistance from any of the genetIC authors, we  also ask that you consider offering an acknowledgement
+or, in cases where the assistance is material to the development of a project, coauthorship to those who are helping you.

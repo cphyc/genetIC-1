@@ -49,7 +49,7 @@ cosmo = Cosmology(Om=0.3, Ol=0.7, z=99)
 sim = Simulation(cosmo, PowerSpectrum(cosmo, amplitude=1e-4))
 sim.base_grid(50, 32)
 sim.seed, sim.seed_mode = 42, "parallel"
-sim.center = jnp.full(3, 25.)
+sim.center = jnp.full(3, 25.0)
 sim.select("sphere", 5)
 sim.modify("overdensity", "absolute", 0.1)
 sim.apply_modifications()

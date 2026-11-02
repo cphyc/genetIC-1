@@ -1,4 +1,5 @@
 """Cosmological initial conditions with double precision JAX arrays."""
+
 import os
 from pathlib import Path
 
@@ -11,6 +12,6 @@ if "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS" not in os.environ:
     config.update("jax_persistent_cache_min_compile_time_secs", 0)
 
 config.update("jax_enable_x64", True)
-from .core import Cosmology, Grid, Simulation, PowerSpectrum, Geometry
+from .core import Cosmology, Geometry, Grid, PowerSpectrum, Simulation  # noqa: E402
 
-__all__ = ["Cosmology", "Grid", "Simulation", "PowerSpectrum", "Geometry"]
+__all__ = ["Cosmology", "Geometry", "Grid", "PowerSpectrum", "Simulation"]

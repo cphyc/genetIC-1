@@ -1,0 +1,41 @@
+minimum_pre_commit_version: "4.0.0"
+
+# The original C++ tree and exploratory implementation are compatibility/reference code.
+exclude: "^(genetIC/|tools/toy_implementation/)"
+
+ci:
+  autofix_prs: false
+  autoupdate_schedule: monthly
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: no-commit-to-branch
+      - id: check-shebang-scripts-are-executable
+      - id: check-executables-have-shebangs
+      - id: check-yaml
+      - id: check-toml
+
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.31.1
+    hooks:
+      - id: zizmor
+
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.13.6
+    hooks:
+      - id: uv-lock
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.3
+    hooks:
+      - id: ruff-format
+        files: '^(genetic|tests)/.*\.py$|^tools/[^/]+\.py$'
+        # core.py is intentionally compact to stay under its 1,000-line limit.
+        exclude: '^genetic/core\.py$'
+      - id: ruff-check
+        args: [--fix, --show-fixes]
+        files: '^(genetic|tests)/.*\.py$|^tools/[^/]+\.py$'
