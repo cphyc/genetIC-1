@@ -13,26 +13,93 @@ def record(stream, data):
     stream.write(marker+data+marker)
 
 
+def tipsy_header(stream, path, cosmo, box, total_mass, ngas, ndm):
+    factor = cosmo.Om/total_mass
+    kpc = box*1000/cosmo.hubble
+    msol = 1e10/cosmo.hubble/factor
+    kms = np.sqrt(4.3022682e-6*msol/kpc)
+    stream.write(struct.pack("<d6i", cosmo.a, ngas+ndm, 3, ngas, ndm, 0, 0))
+    Path(path).with_name("tipsy.param").write_text(f"dKpcUnit = {kpc:.6g}\ndMsolUnit = {msol:.6g}\ndHubble0 = {0.1*cosmo.hubble*kpc/kms:.6g}\nbComove = 1\n")
+    return factor, kms
+
+
+def tipsy_records(p, gas, cosmo, box, factor, kms):
+    out = np.zeros((len(p["mass"]), 12 if gas else 9), dtype="<f4")
+    out[:, 0] = p["mass"]*factor
+    out[:, 1:4] = p["pos"]/box-.5
+    out[:, 4:7] = p["vel"]/np.sqrt(cosmo.a)/kms
+    out[:, 9 if gas else 7] = p["eps"]/box
+    if gas:
+        out[:, 8] = cosmo.temperature
+    return out
+
+
 def write_tipsy(path, particles, cosmo, box):
     p = jax.device_get(particles)
     gas = p["gas"]
-    mass_factor = cosmo.Om/np.sum(p["mass"])
-    kpc = box*1000/cosmo.hubble
-    msol = 1e10/cosmo.hubble/mass_factor
-    kms = np.sqrt(4.3022682e-6*msol/kpc)
     with open(path, "wb") as stream:
-        stream.write(struct.pack("<d6i", cosmo.a, len(gas), 3, int(gas.sum()), int((~gas).sum()), 0, 0))
-        for is_gas, width in [(True, 12), (False, 9)]:
-            mask = gas == is_gas
-            out = np.zeros((mask.sum(), width), dtype="<f4")
-            out[:, 0] = p["mass"][mask]*mass_factor
-            out[:, 1:4] = p["pos"][mask]/box-.5
-            out[:, 4:7] = p["vel"][mask]/np.sqrt(cosmo.a)/kms
-            out[:, 9 if is_gas else 7] = p["eps"][mask]/box
-            if is_gas:
-                out[:, 8] = cosmo.temperature
-            out.tofile(stream)
-    Path(path).with_name("tipsy.param").write_text(f"dKpcUnit = {kpc:.6g}\ndMsolUnit = {msol:.6g}\ndHubble0 = {0.1*cosmo.hubble*kpc/kms:.6g}\nbComove = 1\n")
+        factor, kms = tipsy_header(stream, path, cosmo, box, np.sum(p["mass"]), int(gas.sum()), int((~gas).sum()))
+        for is_gas in (True, False):
+            selected = {k: p[k][gas == is_gas] for k in ("mass", "pos", "vel", "eps")}
+            tipsy_records(selected, is_gas, cosmo, box, factor, kms).tofile(stream)
+
+
+def particle_points(block, start, stop):
+    """Host I/O batches in the mapper's parent-then-child ordering."""
+    gas, level, grid, kind, parent, parents, mask = block
+    index = np.arange(start, stop)
+    if parent is None:
+        points = np.stack(np.unravel_index(index, (grid.n,)*3), -1)
+        points = (points+.5)*grid.dx+np.asarray(grid.origin)
+    else:
+        ratio = round(parent.dx/grid.dx)
+        coarse = np.stack(np.unravel_index(parents[index//ratio**3], (parent.n,)*3), -1)
+        fine = np.stack(np.unravel_index(index % ratio**3, (ratio,)*3), -1)
+        points = (coarse*parent.dx+np.asarray(parent.origin)+(fine+.5)*grid.dx) % grid.box
+    if mask is not None:
+        cells = np.floor((points-np.asarray(grid.origin)) % grid.box/grid.dx+1e-10).astype(int) % grid.n
+        points = points[~mask[tuple(cells.T)]]
+    return points
+
+
+def write_tipsy_stream(path, sim, center_output=False, chunk_size=262144):
+    """Bound GPU and host working memory while writing the complete snapshot."""
+    sim.combine()
+    layouts, total_mass, counts = [], 0., [0, 0]
+    for gas in (True, False):
+        if gas and sim.cosmo.Ob == 0:
+            continue
+        hierarchy, masks = sim.particle_hierarchy(gas)
+        masks = jax.device_get(masks)
+        for i, (level, grid, kind) in enumerate(hierarchy):
+            if gas and not (sim.baryons_all_levels or level == len(sim.grids)-1):
+                continue
+            parent = hierarchy[i-1][1] if i else None
+            parents = np.flatnonzero(masks[i-1]) if i else None
+            mask = masks[i] if i < len(masks) else None
+            block = (gas, level, grid, kind, parent, parents, mask)
+            raw = len(parents)*round(parent.dx/grid.dx)**3 if i else grid.n**3
+            count = raw if mask is None else (raw-int(mask.sum()) if i == 0 else
+                    sum(len(particle_points(block, a, min(a+chunk_size, raw))) for a in range(0, raw, chunk_size)))
+            split = sim.baryons_all_levels or level == len(sim.grids)-1
+            fraction = sim.cosmo.Ob/sim.cosmo.Om if gas else (1-sim.cosmo.Ob/sim.cosmo.Om if split else 1)
+            total_mass += count*27.744948*sim.cosmo.Om*grid.dx**3*fraction
+            counts[0 if gas else 1] += count
+            layouts.append((block, raw))
+    box = sim.grids[0].box
+    with open(path, "wb") as stream:
+        factor, kms = tipsy_header(stream, path, sim.cosmo, box, total_mass, *counts)
+        for block, raw in layouts:
+            gas, level, grid, kind, *_ = block
+            for start in range(0, raw, chunk_size):
+                points = particle_points(block, start, min(start+chunk_size, raw))
+                if not len(points):
+                    continue
+                data = sim.particle_block(level, grid, points, kind, gas)
+                p = jax.device_get({k: data[k] for k in ("mass", "pos", "vel", "eps")})
+                if center_output:
+                    p["pos"] = (p["pos"]+box/2-np.asarray(sim.center)) % box
+                tipsy_records(p, gas, sim.cosmo, box, factor, kms).tofile(stream)
 
 
 def write_gadget(path, p, cosmo, box, files=1, version=3):

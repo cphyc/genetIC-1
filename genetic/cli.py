@@ -114,7 +114,7 @@ class Interpreter(Geometry):
             self.log(f"  Num particles         = {jnp.sum(s.replaced[-1])}")
             self.log(f"  Low-left corner in parent grid = ({origin[0]}, {origin[1]}, {origin[2]})")
             self.log("  Low-left corner (h**-1 Mpc)    = "+", ".join(f"{v:.6g}" for v in child.origin))
-            self.log(f"  Total particles       = {sum(len(b[2]) for b in s.particle_layout())}")
+            self.log(f"  Total particles       = {s.particle_count()}")
         elif name == "center":
             s.center = jnp.array([f(i) for i in range(3)])
         elif name == "center_on":
@@ -275,6 +275,9 @@ class Interpreter(Geometry):
             raise ValueError("No output format specified!")
         if self.format not in ("tipsy", "gadget2", "gadget3", "gadgethdf", "swift"):
             raise ValueError(f"Unsupported output format {self.format}")
+        if self.format == "tipsy" and s.flagged_type is None:
+            io.write_tipsy_stream(str(self.path)+".tipsy", s, self.center_output)
+            return
         p = s.particles(self.format == "tipsy")
         box = s.grids[0].box
         if self.center_output:

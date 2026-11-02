@@ -4,7 +4,7 @@ Internal routines assume aligned, nested cubic grids with integral resolution ra
 Fourier arrays use unitary normalization and real fields use cell centred samples.
 """
 from dataclasses import dataclass, field
-from functools import partial
+from functools import cached_property, partial
 import math
 
 import jax
@@ -64,6 +64,20 @@ class Cosmology:
     def internal_energy(self):
         return 1.5 * self.temperature * 1.380649e-29 / (1.6726219e-27 * 4 / 3.28) / self.a
 
+@jax.jit
+def spline_transfer(k, x, coefficients):
+    logk = jnp.log(jnp.where(k > 0, k, 1))
+    index = jnp.clip(jnp.searchsorted(jnp.asarray(x), logk)-1, 0, len(x)-2)
+    dx = logk-jnp.asarray(x)[index]
+    c = jnp.asarray(coefficients)[:, index]
+    value = jnp.exp(((c[0]*dx+c[1])*dx+c[2])*dx+c[3])
+    return jnp.where((k > 0) & (logk >= x[0]) & (logk <= x[-1]), value, 0)
+
+@jax.jit
+def spectrum_power(k, amplitude, ns, spline=None):
+    transfer = spline_transfer(k, *spline) if spline is not None else 1
+    return jnp.where(k > 0, amplitude*jnp.where(k > 0, k, 1)**ns*transfer*transfer, 0)
+
 class PowerSpectrum:
     """CAMB transfer tables (7 or 13 columns), or a power law for experiments."""
     def __init__(self, cosmo, table=None, amplitude=1.):
@@ -87,21 +101,18 @@ class PowerSpectrum:
             self.amplitude = (cosmo.s8*cosmo.growth()/cosmo.growth(1))**2 / variance
 
     def transfer(self, k, species="all"):
-        x, coefficients = self.splines[species]
-        logk = jnp.log(jnp.where(k > 0, k, 1))
-        index = jnp.clip(jnp.searchsorted(jnp.asarray(x), logk)-1, 0, len(x)-2)
-        dx = logk-jnp.asarray(x)[index]
-        c = jnp.asarray(coefficients)[:, index]
-        value = jnp.exp(((c[0]*dx+c[1])*dx+c[2])*dx+c[3])
-        return jnp.where((k > 0) & (logk >= x[0]) & (logk <= x[-1]), value, 0)
+        return spline_transfer(k, *self.splines[species])
 
     def __call__(self, k, species="all"):
-        k = jnp.asarray(k)
-        t = self.transfer(k, species) if self.splines else 1
-        return jnp.where(k > 0, self.amplitude*jnp.where(k > 0, k, 1)**self.ns*t*t, 0)
+        return spectrum_power(jnp.asarray(k), self.amplitude, self.ns, self.splines[species] if self.splines else None)
 
-    def covariance(self, grid, species="all"):
-        return self(grid.k, species)/grid.dx**3
+    def covariance(self, grid, species="all", half_spectrum=False):
+        k = grid.k[..., :grid.n//2+1] if half_spectrum else grid.k
+        return self(k, species)/grid.dx**3
+
+@partial(jax.jit, static_argnums=(0,))
+def grid_points(n, dx, origin):
+    return (jnp.moveaxis(jnp.indices((n,)*3), 0, -1)+.5)*dx+origin
 
 @dataclass(eq=False)
 class Grid:
@@ -117,10 +128,17 @@ class Grid:
         self.box = self.length if self.box is None else self.box
         self.origin = jnp.asarray(self.origin, dtype=float)
         self.flags = jnp.zeros((self.n,)*3, bool) if self.flags is None else self.flags
-        self.points = (jnp.moveaxis(jnp.indices((self.n,)*3), 0, -1)+.5)*self.dx+self.origin
         k = jnp.fft.fftfreq(self.n)*self.n*2*jnp.pi/self.length
-        self.wavevectors = jnp.meshgrid(k, k, k, indexing="ij")
-        self.k = jnp.sqrt(sum(v*v for v in self.wavevectors))
+        self.wavevectors = tuple(k.reshape(tuple(self.n if a == b else 1 for b in range(3))) for a in range(3))
+
+    @cached_property
+    def k(self):
+        with jax.ensure_compile_time_eval():
+            return jnp.sqrt(sum(v*v for v in self.wavevectors))
+
+    @property
+    def points(self):
+        return grid_points(self.n, self.dx, self.origin)
 
     @property
     def dx(self):
@@ -167,17 +185,50 @@ def interpolate(values, coordinates, periodic=True):
         i, j, k = term//16, term//4 % 4, term % 4
         indices = base+jnp.array([i-1, j-1, k-1])
         indices = indices % n if periodic else jnp.clip(indices, 0, n-1)
-        return result + values[indices[..., 0], indices[..., 1], indices[..., 2]] * weights[..., 0, i]*weights[..., 1, j]*weights[..., 2, k]
-    return jax.lax.fori_loop(0, 64, accumulate, jnp.zeros(coordinates.shape[:-1], dtype=values.dtype))
+        weight = weights[..., 0, i]*weights[..., 1, j]*weights[..., 2, k]
+        return result + values[indices[..., 0], indices[..., 1], indices[..., 2]] * weight.reshape(weight.shape+(1,)*(values.ndim-3))
+    return jax.lax.fori_loop(0, 64, accumulate, jnp.zeros(coordinates.shape[:-1]+values.shape[3:], dtype=values.dtype))
 
 def sample(values, grid, points):
     coordinates = ((jnp.asarray(points)-jnp.asarray(grid.origin)) % grid.box)/grid.dx-.5
     return interpolate(values, coordinates, grid.length == grid.box)
 
+@partial(jax.jit, static_argnames=("periodic",))
+def interpolate_grid(values, coordinates, periodic=True):
+    """Separable cubic interpolation on a Cartesian product of sample axes."""
+    for axis, coordinate in enumerate(coordinates):
+        base = jnp.floor(coordinate).astype(int)
+        index = base[:, None]+jnp.arange(-1, 3)
+        index = index % values.shape[axis] if periodic else jnp.clip(index, 0, values.shape[axis]-1)
+        shape = [1]*(values.ndim+1)
+        shape[axis:axis+2] = index.shape
+        values = jnp.sum(jnp.take(values, index, axis=axis)*cubic_weights(coordinate-base).reshape(shape), axis=axis+1)
+    return values
+
+def grid_coordinates(source, target, ranges=None):
+    ranges = (slice(0, target.n),)*3 if ranges is None else ranges
+    return tuple(((target.origin[a]+(jnp.arange(r.start, r.stop)+.5)*target.dx-source.origin[a]) % source.box)/source.dx-.5 for a, r in enumerate(ranges))
+
+def grid_indices(source, target):
+    return tuple(jnp.floor(c+.5+1e-10).astype(int) % source.n for c in grid_coordinates(source, target))
+
+def selected_points(grid, mask):
+    from .splice import selected_cells
+    cpu = jax.devices("cpu")[0]
+    with jax.default_device(cpu):
+        mask = jax.device_put(mask, cpu)
+        index = selected_cells(mask, size=int(jnp.sum(mask)))
+        cells = jnp.stack((index//grid.n**2, index//grid.n % grid.n, index % grid.n), -1)
+        points = (cells+.5)*grid.dx+jax.device_put(grid.origin, cpu)
+    return jax.device_put(points, grid.origin.device)
+
+def sample_grid(values, source, target):
+    return interpolate_grid(values, grid_coordinates(source, target), source.length == source.box)
+
 def resample(values, source, target):
     """Sample an aligned grid, averaging child cells when reducing resolution."""
     if target.dx < source.dx*(1-1e-8):
-        return sample(values, source, target.points)
+        return sample_grid(values, source, target)
     ratio = round(target.dx/source.dx)
     for axis in range(3):
         lower = target.origin[axis]+jnp.arange(target.n)*target.dx
@@ -200,62 +251,17 @@ def displacement(density, grid):
     return jnp.stack([ifft(jnp.where((jnp.abs(v) < jnp.pi/grid.dx*(1-1e-12)) & (k2 > 0), 1j*v*density/jnp.where(k2 > 0, k2, 1), 0))
                       for v in grid.wavevectors], axis=-1)
 
+@jax.jit
+def displacement_mode(density, wave, k, dx):
+    return jnp.where((jnp.abs(wave) < jnp.pi/dx*(1-1e-12)) & (k > 0),
+                     1j*wave*density/jnp.where(k > 0, k*k, 1), 0)
+
+@partial(jax.jit, donate_argnums=(0,))
+def store_component(destination, values, axis):
+    return destination.at[..., axis].set(values)
+
 def derivative(values, axis, dx):
     return (jnp.roll(values, 2, axis)-8*jnp.roll(values, 1, axis)+8*jnp.roll(values, -1, axis)-jnp.roll(values, -2, axis))/(12*dx)
-
-def axpy(a, b, scale=1):
-    return jax.tree.map(lambda x, y: x+scale*y, a, b)
-
-def krylov(operator, b, precondition, residual, rtol, atol, maximum, solver):
-    """Preconditioned CG/MINRES with verification in output-density units."""
-    dot = lambda a, b: sum(jnp.vdot(x, y).real for x, y in zip(a, b))
-    scale = lambda a, t: jax.tree.map(lambda x: x*t, a)
-    zero = scale(b, 0)
-    norm = lambda v: jnp.sqrt(dot(v, v))
-    tolerance = jnp.maximum(rtol*norm(b), atol)
-    z = precondition(b)
-    if solver == "cg":
-        def step(state):
-            i, x, r, p, rho, error = state
-            image = operator(p)
-            alpha = rho/dot(p, image)
-            x, recursive = axpy(x, p, alpha), axpy(r, image, -alpha)
-            check = (norm(recursive) <= tolerance) | ((i+1) % 10 == 0) | (i+1 == maximum)
-            r = jax.lax.cond(check, lambda _: residual(x), lambda _: recursive, None)
-            weighted = precondition(r)
-            next_rho = dot(r, weighted)
-            restart = norm(axpy(recursive, r, -1)) > .1*norm(r)
-            p = axpy(weighted, p, jnp.where(restart, 0, next_rho/rho))
-            return i+1, x, r, p, next_rho, norm(r)
-        state = (jnp.int64(0), zero, b, z, dot(b, z), norm(b))
-        state = jax.lax.while_loop(lambda s: (s[0] < maximum) & (s[-1] > tolerance), step, state)
-        return state[1], norm(residual(state[1]))
-    beta0 = jnp.sqrt(dot(b, z))
-    divide = lambda a, t: scale(a, 1/jnp.where(t > 0, t, 1))
-    def step(state):
-        i, x, z, v, previous, direction, previous_direction, beta, dbar, epsilon, cosine, sine, estimate, error = state
-        next_z = axpy(operator(v), previous, -beta)
-        alpha = dot(v, next_z)
-        next_z = axpy(next_z, z, -alpha)
-        next_v = precondition(next_z)
-        next_beta = jnp.sqrt(jnp.maximum(dot(next_z, next_v), 0))
-        delta, gbar = cosine*dbar+sine*alpha, sine*dbar-cosine*alpha
-        gamma = jnp.hypot(gbar, next_beta)
-        next_direction = divide(axpy(axpy(v, previous_direction, -epsilon), direction, -delta), gamma)
-        x = axpy(x, next_direction, gbar/gamma*estimate)
-        estimate *= next_beta/gamma
-        r = residual(x)
-        error = norm(r)
-        weighted = precondition(r)
-        actual = jnp.sqrt(jnp.maximum(dot(r, weighted), 0))
-        restart = ((i+1) % 10 == 0) & ((next_beta == 0) | (actual > 1.1*estimate))
-        fresh = (divide(r, actual), divide(weighted, actual), zero, zero, zero, 0., 0., 0., -1., 0., actual)
-        usual = (divide(next_z, next_beta), divide(next_v, next_beta), z, next_direction, direction, next_beta, -gbar/gamma*next_beta, sine*next_beta, gbar/gamma, next_beta/gamma, estimate)
-        values = jax.tree.map(lambda a, b: jnp.where(restart, a, b), fresh, usual)
-        return (i+1, x, *values, error)
-    state = (jnp.int64(0), zero, divide(b, beta0), divide(z, beta0), zero, zero, zero, jnp.float64(0), jnp.float64(0), jnp.float64(0), jnp.float64(-1), jnp.float64(0), beta0, norm(b))
-    state = jax.lax.while_loop(lambda s: (s[0] < maximum) & (s[-1] > tolerance), step, state)
-    return state[1], norm(residual(state[1]))
 
 def log10_split(x):
     """Split log10(2) to preserve legacy shell boundaries at powers of two."""
@@ -536,20 +542,34 @@ class Simulation:
         self.draw()
         if self.combined:
             return
-        density = [x*jnp.sqrt(self.spectrum.covariance(g)) for x, g in zip(self.noise, self.grids)]
-        offsets = [displacement(x, g) for x, g in zip(density, self.grids)]
-        self.density = self.combine_levels(density)
-        self.offsets = [jnp.stack(v, -1) for v in zip(*[self.combine_levels([fft(v[..., a]) for v in offsets]) for a in range(3)])]
+        density = [x[..., :g.n//2+1]*jnp.sqrt(self.spectrum.covariance(g, half_spectrum=True)) for x, g in zip(self.noise, self.grids)]
+        self.density = self.combine_levels(density, half_spectrum=True)
+        # Spill retained fields temporarily while FFT workspaces coexist.
+        self.noise, self.density = jax.device_put((self.noise, self.density), jax.devices("cpu")[0])
+        jax.block_until_ready((self.noise, self.density))
+        self.offsets = [jnp.empty((g.n,)*3+(3,)) for g in self.grids]
+        for axis in range(3):
+            components = self.combine_levels([displacement_mode(v, g.wavevectors[axis][..., :g.n//2+1], g.k[..., :g.n//2+1], g.dx)
+                                              for v, g in zip(density, self.grids)], half_spectrum=True)
+            for i, values in enumerate(components):
+                self.offsets[i] = store_component(self.offsets[i], values, axis)
+            del components, values
+        del density
+        jax.block_until_ready(self.offsets)
+        self.noise, self.density = jax.device_put((self.noise, self.density), self.grids[0].origin.device)
         self.combined = True
 
-    def combine_levels(self, fields):
+    def combine_levels(self, fields, half_spectrum=False):
         """Production synthesis, from independent Fourier fields to real density."""
-        result = [ifft(fields[0])]
+        inverse = lambda v, g: jnp.fft.irfftn(v, s=(g.n,)*3, norm="ortho") if half_spectrum else ifft(v)
+        forward = partial(jnp.fft.rfftn, norm="ortho") if half_spectrum else fft
+        wave = lambda g: g.k[..., :g.n//2+1] if half_spectrum else g.k
+        result = [inverse(fields[0], self.grids[0])]
         for i, child in enumerate(self.grids[1:], 1):
             parent = self.grids[i-1]
             cutoff = .3*parent.n*2*jnp.pi/parent.length
-            high = jnp.sqrt(1-lowpass(child.k, cutoff)**2)
-            result.append(ifft(fields[i]*high)+sample(ifft(fft(result[-1])*lowpass(parent.k, cutoff)), parent, child.points))
+            high = jnp.sqrt(1-lowpass(wave(child), cutoff)**2)
+            result.append(inverse(fields[i]*high, child)+sample_grid(inverse(forward(result[-1])*lowpass(wave(parent), cutoff), parent), parent, child))
         return tuple(result)
 
     def synthesize(self, latents):
@@ -563,6 +583,7 @@ class Simulation:
         using the exact transpose of production synthesis, without lifting DC.
         """
         from .random import LegacyRandom
+        from .splice import SpliceOperator, axpy, solve
         self.draw()
         solver = self.splice_solver if solver is None else solver
         if self.combined or not 0 < accuracy < 1 or solver not in ("cg", "minres") or border < 1:
@@ -571,37 +592,36 @@ class Simulation:
         for i, g in enumerate(self.grids):
             mask = g.flags
             if i:
-                mask = mask & self.replaced[i-1][tuple(self.grids[i-1].indices(g.points).transpose(3, 0, 1, 2))]
+                mask = mask & self.replaced[i-1][jnp.ix_(*grid_indices(self.grids[i-1], g))]
             if i < len(self.grids)-1:
                 mask = mask & ~self.replaced[i]
             for ancestor in self.grids[1:i+1]:
-                relative = (g.points-ancestor.origin) % g.box
-                safe = jnp.all((relative >= border*ancestor.dx) & (relative < ancestor.length-border*ancestor.dx), -1)
+                axes = tuple((c+.5 >= border) & (c+.5 < ancestor.n-border) for c in grid_coordinates(ancestor, g))
+                safe = axes[0][:, None, None] & axes[1][None, :, None] & axes[2][None, None, :]
                 if jnp.any(mask & ~safe):
                     raise ValueError("Splice region is too close to a zoom edge; enlarge the zoom grid")
             masks.append(mask)
         if not jnp.any(jnp.stack([jnp.any(mask) for mask in masks])):
             return
-        original = tuple(ifft(v) for v in self.noise)
+        original = tuple(v[..., :g.n//2+1] for v, g in zip(self.noise, self.grids))
+        operator = SpliceOperator(self.grids, [self.spectrum.covariance(g, half_spectrum=True) for g in self.grids], masks)
+        forward, transpose = operator.forward, operator.transpose
+        current = forward(original)
+        maximum = jnp.maximum(100, 4*sum(jnp.sum(m) for m in masks))
+        dtype = jnp.float32 if accuracy >= 1e-5 else jnp.float64
         rng = LegacyRandom(seed)
-        donor = tuple(ifft(rng.field(g.n, self.seed_mode)) for g in self.grids)
-        covariances = [self.spectrum.covariance(g) for g in self.grids]
-        masked = lambda fields: tuple(v*m for v, m in zip(fields, masks))
-        forward = jax.jit(lambda fields: masked(self.synthesize(fields)))
-        transpose = jax.jit(lambda fields: jax.linear_transpose(self.synthesize, original)(masked(fields))[0])
-        gram = lambda fields: forward(transpose(fields))
-        precondition = lambda fields: tuple(ifft(fft(v)/jnp.where(c > 0, c, 1)) for v, c in zip(fields, covariances))
-        target, current = forward(donor), forward(original)
+        donor = tuple(rng.field(g.n, self.seed_mode, half_spectrum=True) for g in self.grids)
+        target = forward(donor)
         rhs = axpy(target, current, -1)
         atol = 8*jnp.finfo(jnp.float64).eps*jnp.maximum(jnp.sqrt(self.dot(target, target)), jnp.sqrt(self.dot(current, current)))
-        residual = lambda dual: axpy(target, forward(axpy(original, transpose(dual))), -1)
-        maximum = jnp.maximum(100, 4*sum(jnp.sum(m) for m in masks))
-        dual, error = krylov(gram, rhs, precondition, residual, accuracy, atol, maximum, solver)
+        dual, error, iterations = solve(operator, original, target, current, accuracy, atol, maximum, solver=solver, dtype=dtype)
         tolerance = jnp.maximum(accuracy*jnp.sqrt(self.dot(rhs, rhs)), atol)
         if not error <= tolerance:
             raise RuntimeError("Splice solver did not satisfy the requested density tolerance")
-        self.noise = [fft(v) for v in axpy(original, transpose(dual))]
+        self.noise = []  # The accepted candidate only needs the retained half spectra.
+        self.noise = [fft(jnp.fft.irfftn(v, s=(g.n,)*3, norm="ortho")) for v, g in zip(axpy(original, transpose(dual)), self.grids)]
         self.splice_residual = error
+        self.splice_iterations = int(iterations)
 
     def particle_hierarchy(self, gas=False):
         """Sampling grids and refinement masks, including virtual padding layers."""
@@ -615,7 +635,7 @@ class Simulation:
                 previous = hierarchy[-1][1]
                 selected = jnp.zeros((previous.n,)*3, bool)
                 parent = self.grids[level-1]
-                points = parent.points[self.replaced[level-1]]
+                points = selected_points(parent, self.replaced[level-1])
                 selected = selected.at[tuple(previous.indices(points).T)].set(True)
                 while self.autopad and not gas and previous.dx/output.dx > 2+1e-8:
                     expanded = dilate(selected, self.autopad)
@@ -649,6 +669,20 @@ class Simulation:
                 points = points[~masks[i][tuple(index.T)]]
             blocks.append((level, output, points, 0 if gas else kind))
         return blocks
+
+    def particle_count(self):
+        """Count the layout without allocating particle coordinate arrays."""
+        if self.strays:
+            return sum(len(b[2]) for b in self.particle_layout())
+        hierarchy, masks = self.particle_hierarchy()
+        total = 0
+        for i, (_, grid, _) in enumerate(hierarchy):
+            owned = jnp.ones((grid.n,)*3, bool)
+            if i:
+                parent = hierarchy[i-1][1]
+                owned = masks[i-1][jnp.ix_(*grid_indices(parent, grid))]
+            total += jnp.sum(owned & ~masks[i] if i < len(masks) else owned)
+        return int(total)
 
     def adapt_mask(self, padding):
         if len(self.grids) < 3:
@@ -716,17 +750,39 @@ class Simulation:
                 result = updated
         return result
 
-    def evaluate(self, fields, level, output, points):
+    def evaluate(self, fields, level, output, points, aligned=False):
         grid = self.grids[level]
-        if output.dx > grid.dx*(1+1e-8):
+        if aligned and math.isclose(output.dx, grid.dx, rel_tol=1e-8):
+            value = fields[level][tuple(grid.indices(points).T)]
+        elif output.dx > grid.dx*(1+1e-8):
             averaged = resample(fields[level], grid, output)
             value = jnp.asarray(averaged)[tuple(output.indices(points).T)]
         else:
             value = jnp.asarray(sample(fields[level], grid, points))
         if level:
             valid = grid.contains(points)
-            value = jnp.where(valid, value, self.evaluate(fields, level-1, output, points))
+            if aligned and bool(jnp.all(valid)):
+                return value
+            valid = valid.reshape(valid.shape+(1,)*(value.ndim-valid.ndim))
+            value = jnp.where(valid, value, self.evaluate(fields, level-1, output, points, aligned))
         return value
+
+    def particle_block(self, level, output, points, ptype, gas):
+        points = jnp.asarray(points)
+        grid = self.grids[level]
+        offsets = self.evaluate(self.offsets, level, output, points, aligned=True)
+        split = self.baryons_all_levels or level == len(self.grids)-1
+        fraction = self.cosmo.Ob/self.cosmo.Om if gas else (1-self.cosmo.Ob/self.cosmo.Om if split else 1)
+        mass = 27.744948*self.cosmo.Om*output.dx**3*fraction
+        n = len(points)
+        kind = jnp.full(n, ptype)
+        if self.flagged_type is not None and not gas and level == len(self.grids)-1:
+            kind = jnp.where(grid.flags[tuple(grid.indices(points).T)], self.flagged_type, kind)
+        return dict(pos=(points+offsets) % grid.box,
+                           vel=offsets*self.cosmo.velocity_factor+self.velocity_offset,
+                           mass=jnp.full(n, mass), eps=jnp.full(n, output.soft_dx*self.eps_norm),
+                           gas=jnp.full(n, gas), ptype=kind,
+                           density=self.evaluate(self.density, level, output, points, aligned=True))
 
     def particles(self, tipsy=False):
         self.combine()
@@ -736,20 +792,7 @@ class Simulation:
             if gas and self.cosmo.Ob == 0:
                 continue
             for level, output, points, ptype in self.particle_layout(gas):
-                grid = self.grids[level]
-                offsets = jnp.stack([self.evaluate([v[..., a] for v in self.offsets], level, output, points) for a in range(3)], axis=-1)
-                split = self.baryons_all_levels or level == len(self.grids)-1
-                fraction = self.cosmo.Ob/self.cosmo.Om if gas else (1-self.cosmo.Ob/self.cosmo.Om if split else 1)
-                mass = 27.744948*self.cosmo.Om*output.dx**3*fraction
-                n = len(points)
-                kind = jnp.full(n, ptype)
-                if self.flagged_type is not None and not gas and level == len(self.grids)-1:
-                    kind = jnp.where(grid.flags[tuple(grid.indices(points).T)], self.flagged_type, kind)
-                blocks.append(dict(pos=(points+offsets) % grid.box,
-                                   vel=offsets*self.cosmo.velocity_factor+self.velocity_offset,
-                                   mass=jnp.full(n, mass), eps=jnp.full(n, output.soft_dx*self.eps_norm),
-                                   gas=jnp.full(n, gas), ptype=kind,
-                                   density=self.evaluate(self.density, level, output, points)))
+                blocks.append(self.particle_block(level, output, points, ptype, gas))
         result = {key: jnp.concatenate([block[key] for block in blocks]) for key in blocks[0]}
         if self.flagged_type is not None:
             flagged = result["ptype"] == self.flagged_type

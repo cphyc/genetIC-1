@@ -106,3 +106,28 @@ def test_core_has_no_host_numeric_dependencies():
         imports = [node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
         imports += [alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names]
         assert not any(module and module.split('.')[0] in {"numpy", "scipy", "ctypes"} for module in imports)
+
+
+def test_combined_half_spectra_preserve_full_spectrum_density_and_offsets():
+    for levels in (1, 2, 3):
+        sim = Simulation(spectrum=PowerSpectrum(Cosmology(ns=-2)))
+        sim.grids = [Grid(8/2**i, 8, origin=(i/2,)*3, box=8) for i in range(levels)]
+        sim.noise = [fft(jnp.sin(jnp.arange(512.)+i).reshape((8,)*3)) for i in range(levels)]
+        original = list(sim.noise)
+        density = [v*jnp.sqrt(sim.spectrum.covariance(g)) for v, g in zip(original, sim.grids)]
+        expected_density = sim.combine_levels(density)
+        offsets = [displacement(v, g) for v, g in zip(density, sim.grids)]
+        expected = [sim.combine_levels([fft(v[..., axis]) for v in offsets]) for axis in range(3)]
+        sim.combine()
+        for i in range(levels):
+            np.testing.assert_allclose(sim.density[i], expected_density[i], atol=1e-12)
+            np.testing.assert_allclose(sim.offsets[i], jnp.stack([v[i] for v in expected], -1), atol=1e-12)
+            np.testing.assert_array_equal(sim.noise[i], original[i])
+            assert sim.noise[i].device == jax.devices()[0]
+
+
+def test_lazy_wave_norm_is_safe_when_first_used_inside_jit():
+    grid = Grid(8, 8)
+    value = jax.jit(lambda x: jnp.sum(grid.k*x))(jnp.ones((8,)*3))
+    assert isinstance(grid.k, jax.Array)
+    np.testing.assert_allclose(value, jnp.sum(grid.k))

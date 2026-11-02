@@ -14,15 +14,16 @@ from genetic.cli import Interpreter
 REPOSITORY = Path(__file__).resolve().parents[1]
 FIXTURES = REPOSITORY / "genetIC/tests"
 SPLICE_FIXTURES = REPOSITORY / "tests/fixtures/splicing"
-CASES = sorted({p.name for root in (FIXTURES, SPLICE_FIXTURES) for p in root.glob("test_*")})
-MAPPERS = sorted(p.name for p in FIXTURES.glob("mapper_test_*"))
+TRACKED_FILES = subprocess.check_output(["git", "ls-files", "genetIC/tests"], cwd=REPOSITORY, text=True).splitlines()
+TRACKED_CASES = {p.parts[2] for p in map(Path, TRACKED_FILES) if len(p.parts) > 3}
+CASES = sorted({name for name in TRACKED_CASES if name.startswith("test_")} | {p.name for p in SPLICE_FIXTURES.glob("test_*")})
+MAPPERS = sorted(name for name in TRACKED_CASES if name.startswith("mapper_test_"))
 
 
 @pytest.fixture(scope="session")
 def fixtures(tmp_path_factory):
     root = tmp_path_factory.mktemp("legacy")
-    files = subprocess.check_output(["git", "ls-files", "genetIC/tests"], cwd=REPOSITORY, text=True).splitlines()
-    for file in files:
+    for file in TRACKED_FILES:
         source = REPOSITORY/file
         target = root/source.relative_to(FIXTURES)
         target.parent.mkdir(parents=True, exist_ok=True)
